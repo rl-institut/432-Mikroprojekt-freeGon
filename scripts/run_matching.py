@@ -632,7 +632,7 @@ def main():
 
 
 
-    # Calculate match rates
+    # #Calculate match rates
     dlr_match_rate = len(all_matched_dlr_ids) / dlr_lines_germany_count * 100 if dlr_lines_germany_count > 0 else 0
     pypsa_eur_match_rate = len(
         all_matched_pypsa_eur_ids) / pypsa_eur_lines_germany_count * 100 if pypsa_eur_lines_germany_count > 0 else 0

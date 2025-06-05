@@ -67,7 +67,7 @@ def add_connection_notification_to_html(html_file):
                 # Last resort: add at the beginning of the HTML
                 html_content = notification_html + '\n' + html_content
 
-        # Write the modified HTML back to the file
+        ##Write the modified HTML back to the file
         with open(html_file, 'w', encoding='utf-8') as f:
             f.write(html_content)
 
