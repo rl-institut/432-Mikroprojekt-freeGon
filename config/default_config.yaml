@@ -19,7 +19,7 @@ paths:
     clipped_dir: "data/clipped/"
 
 matching:
-  min_line_length_km: 1.0
+  min_line_length_km: 0.0 #1.0
   filter_voltage: 110.0
 
   dlr:

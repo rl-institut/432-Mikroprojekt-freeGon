@@ -1,123 +1,126 @@
 import logging
 import geopandas as gpd
 from shapely.geometry import LineString, box
+from shapely.geometry.multilinestring import MultiLineString
 
 logger = logging.getLogger(__name__)
 
 
-def clip_to_germany_strict(lines_gdf: gpd.GeoDataFrame,
-                           germany_gdf: gpd.GeoDataFrame,
-                           min_length_km: float = 1.0) -> gpd.GeoDataFrame:
+def clip_to_germany_strict(
+        lines_gdf:   gpd.GeoDataFrame,
+        germany_gdf: gpd.GeoDataFrame,
+        min_length_km: float = 1.0,
+        id_col: str = "id"
+) -> gpd.GeoDataFrame:
     """
-    Return only those parts of every source line that lie completely inside Germany.
-    This function is very strict to guarantee that no segment extends beyond the borders.
+    Keep only the portions of each line that lie *inside* Germany
+    (with a 500-m safety offset).  A segment shorter than `min_length_km`
+    is *dropped* **only if** the *whole circuit* (all pieces that share
+    `id_col`) is shorter than the threshold.  This preserves the little
+    connector stubs that were causing visual gaps.
 
-    Parameters:
-    - lines_gdf: GeoDataFrame containing line geometries to clip
-    - germany_gdf: GeoDataFrame containing Germany boundary
-    - min_length_km: Minimum length in kilometers to keep for clipped segments
-
-    Returns:
-    - GeoDataFrame with clipped lines inside Germany
+    Parameters
+    ----------
+    lines_gdf      : GeoDataFrame with LineString / MultiLineString geometries
+    germany_gdf    : GeoDataFrame with the German boundary
+    min_length_km  : Minimum length for an entire logical line to survive
+                     (set 0 to disable length filtering completely)
+    id_col         : Column that identifies one logical circuit
+                     (defaults to "id"; if missing, the old behaviour is kept)
     """
     if lines_gdf is None or lines_gdf.empty:
         logger.warning("Empty GeoDataFrame passed to clip_to_germany_strict")
         return gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
 
-    # Make copies for safety
-    lines = lines_gdf.copy()
+    # --- copy & set CRS -----------------------------------------------------
+    lines   = lines_gdf.copy()
     germany = germany_gdf.copy()
 
-    # Make sure CRS is set
-    if not lines.crs:
+    if lines.crs is None:
         lines.crs = "EPSG:4326"
-    if not germany.crs:
+    if germany.crs is None:
         germany.crs = "EPSG:4326"
 
-    common_crs = "EPSG:3035"  # Meter-based projection for Europe
-    try:
-        lines = lines.to_crs(common_crs)
-        germany = germany.to_crs(common_crs)
-    except Exception as e:
-        logger.error(f"CRS conversion failed: {str(e)}. Trying with original CRSs.")
+    metric_crs = "EPSG:3035"                       # metres
+    lines   = lines.to_crs(metric_crs)
+    germany = germany.to_crs(metric_crs)
 
-    # Optionally, fix source geometries if invalid
-    def fix_geometry(geom):
-        if not geom.is_valid:
-            try:
-                # Try to use make_valid if available
-                try:
-                    from shapely.validation import make_valid
-                    geom = make_valid(geom)
-                except ImportError:
-                    # Fallback to buffer(0) if make_valid is not available
-                    geom = geom.buffer(0)
-            except Exception as e:
-                logger.warning(f"Could not fix geometry: {e}")
-        return geom
+    # --- shrink boundary by 500 m ------------------------------------------
+    germany_boundary = germany.geometry.unary_union.buffer(-500)
 
-    lines['geometry'] = lines['geometry'].apply(fix_geometry)
-
-    # Get Germany boundary as a single geometry
-    germany_boundary = germany.geometry.unary_union
-
-    # Apply a negative buffer of 500 m to shrink the boundary slightly
-    buffer_distance = -500  # 500 m inward
-    germany_boundary_shrunk = germany_boundary.buffer(buffer_distance)
-
-    clipped_lines = []
+    # --- intersection -------------------------------------------------------
+    clipped_rows = []
     for idx, row in lines.iterrows():
-        # Skip missing or empty geometries
-        if row.geometry is None or row.geometry.is_empty:
+        geom = row.geometry
+        if geom is None or geom.is_empty:
             continue
+
+        if not geom.intersects(germany_boundary):
+            continue
+
         try:
-            # Check if the geometry intersects the shrunk boundary
-            if not row.geometry.intersects(germany_boundary_shrunk):
-                continue
-            clipped_geom = row.geometry.intersection(germany_boundary_shrunk)
-            if clipped_geom.is_empty:
-                continue
-
-            # Depending on type, select only segments longer than min_length_km
-            if clipped_geom.geom_type == 'LineString':
-                if clipped_geom.length >= min_length_km * 1000:
-                    new_row = row.copy()
-                    new_row.geometry = clipped_geom
-                    clipped_lines.append(new_row)
-            elif clipped_geom.geom_type == 'MultiLineString':
-                valid_parts = [part for part in clipped_geom.geoms if part.length >= min_length_km * 1000]
-                if valid_parts:
-                    from shapely.geometry import MultiLineString
-                    new_geom = valid_parts[0] if len(valid_parts) == 1 else MultiLineString(valid_parts)
-                    new_row = row.copy()
-                    new_row.geometry = new_geom
-                    clipped_lines.append(new_row)
-            elif hasattr(clipped_geom, 'geoms'):
-                line_parts = [part for part in clipped_geom.geoms if
-                              part.geom_type == 'LineString' and part.length >= min_length_km * 1000]
-                if line_parts:
-                    from shapely.geometry import MultiLineString
-                    new_geom = line_parts[0] if len(line_parts) == 1 else MultiLineString(line_parts)
-                    new_row = row.copy()
-                    new_row.geometry = new_geom
-                    clipped_lines.append(new_row)
+            part = geom.intersection(germany_boundary)
         except Exception as e:
-            logger.error(f"Error processing line {idx}: {str(e)}")
+            logger.error(f"Intersection failed for row {idx}: {e}")
             continue
 
-    if not clipped_lines:
-        return gpd.GeoDataFrame(geometry=[], crs=common_crs).to_crs("EPSG:4326")
+        if part.is_empty:
+            continue
 
-    result_gdf = gpd.GeoDataFrame(clipped_lines, crs=common_crs)
-    result_gdf = result_gdf[~result_gdf.geometry.is_empty & result_gdf.geometry.notna()]
+        # keep only the LineString pieces (drop tiny polygons from overlaps)
+        if part.geom_type == "LineString":
+            pieces = [part]
+        elif part.geom_type == "MultiLineString":
+            pieces = list(part.geoms)
+        elif hasattr(part, "geoms"):
+            pieces = [g for g in part.geoms if g.geom_type == "LineString"]
+        else:
+            pieces = []
 
-    try:
-        result_gdf = result_gdf.to_crs("EPSG:4326")
-    except Exception as e:
-        logger.error(f"Error converting clipped data back to EPSG:4326: {str(e)}")
+        if not pieces:
+            continue
 
-    logger.info(f"Strict clipping: {len(result_gdf)} lines remain from original {len(lines_gdf)}")
-    return result_gdf
+        # build new geometry – join pieces together if there are many
+        new_geom = pieces[0] if len(pieces) == 1 else MultiLineString(pieces)
+
+        new_row = row.copy()
+        new_row.geometry = new_geom
+        clipped_rows.append(new_row)
+
+    if not clipped_rows:         # nothing survived
+        return gpd.GeoDataFrame(geometry=[], crs=metric_crs).to_crs("EPSG:4326")
+
+    clipped = gpd.GeoDataFrame(clipped_rows, crs=metric_crs)
+
+    # --- length-based filtering  -------------------------------------------
+    if min_length_km > 0:
+        clipped["seg_len_km"] = clipped.geometry.length / 1000.0
+
+        if id_col in clipped.columns:
+            # total length of each logical circuit
+            total_len = (
+                clipped.groupby(id_col)["seg_len_km"]
+                .transform("sum")
+                .rename("total_len_km")
+            )
+            clipped["total_len_km"] = total_len
+            keep_mask = (clipped["total_len_km"] >= min_length_km)
+        else:
+            # fall back to old behaviour (per segment)
+            keep_mask = (clipped["seg_len_km"] >= min_length_km)
+
+        before = len(clipped)
+        clipped = clipped[keep_mask].drop(columns=["seg_len_km", "total_len_km"], errors="ignore")
+        logger.info(
+            f"Strict clipping: kept {len(clipped)} of {before} segments "
+            f"(threshold {min_length_km} km, grouped by '{id_col}' "
+            f"{'present' if id_col in lines_gdf.columns else 'absent'})."
+        )
+    else:
+        logger.info("Strict clipping: length filter disabled – kept every intersecting segment.")
+
+    # --- back to WGS-84 -----------------------------------------------------
+    return clipped.to_crs("EPSG:4326")
 
 
 def calculate_distance_km(lon1, lat1, lon2, lat2):

@@ -281,6 +281,9 @@ def create_directories(config):
         os.makedirs(os.path.join(config['paths']['output']['charts_dir'], dataset), exist_ok=True)
 
 
+
+
+
 def main():
     """
     Main function to run the grid line matching process.
@@ -468,11 +471,13 @@ def main():
     final_matches_dlr = match_lines_detailed(
         dlr_lines,
         network_lines,
-        buffer_distance=dlr_config['buffer_distance'],
-        snap_distance=dlr_config['snap_distance'],
-        direction_threshold=dlr_config['direction_threshold'],
-        enforce_voltage_matching=dlr_config['enforce_voltage_matching'],
-        dataset_name="DLR"
+        buffer_distance=0.020,
+        snap_distance=0.009,
+        direction_threshold=0.65,
+        enforce_voltage_matching=False,
+        dataset_name="DLR",
+        merge_segments=True,
+        max_matches_per_source=20  # Limit to 20 matches per source line
     )
 
     # Process DLR matches
@@ -589,19 +594,21 @@ def main():
         logger.info("Creating comprehensive map...")
 
         map_file = os.path.join(config['paths']['output']['maps_dir'], 'comprehensive_grid_map.html')
+
+        # Create the map with all datasets
         create_comprehensive_map(
             dlr_lines=dlr_lines,
             network_lines=network_lines,
             matches_dlr=final_matches_dlr if not (final_matches_dlr is None or final_matches_dlr.empty) else None,
             pypsa_lines=pypsa_eur_lines if pypsa_eur_lines_germany_count > 0 else None,
             matches_pypsa=final_matches_pypsa_eur if not (
-                        final_matches_pypsa_eur is None or final_matches_pypsa_eur.empty) else None,
+                    final_matches_pypsa_eur is None or final_matches_pypsa_eur.empty) else None,
             fifty_hertz_lines=fifty_hertz_lines if fifty_hertz_lines_germany_count > 0 else None,
             tennet_lines=tennet_lines if tennet_lines_germany_count > 0 else None,
             matches_fifty_hertz=final_matches_fifty_hertz if not (
-                        final_matches_fifty_hertz is None or final_matches_fifty_hertz.empty) else None,
+                    final_matches_fifty_hertz is None or final_matches_fifty_hertz.empty) else None,
             matches_tennet=final_matches_tennet if not (
-                        final_matches_tennet is None or final_matches_tennet.empty) else None,
+                    final_matches_tennet is None or final_matches_tennet.empty) else None,
             germany_gdf=germany_gdf,
             output_file=map_file,
             matched_ids={
@@ -615,10 +622,15 @@ def main():
             network_lines_germany_count=network_lines_germany_count,
             pypsa_lines_germany_count=pypsa_eur_lines_germany_count,
             fifty_hertz_lines_germany_count=fifty_hertz_lines_germany_count,
-            tennet_lines_germany_count=tennet_lines_germany_count
+            tennet_lines_germany_count=tennet_lines_germany_count,
+            detect_connections=True  # Enable automatic connection detection
         )
 
         logger.info(f"Comprehensive map saved to {map_file}")
+
+
+
+
 
     # Calculate match rates
     dlr_match_rate = len(all_matched_dlr_ids) / dlr_lines_germany_count * 100 if dlr_lines_germany_count > 0 else 0
