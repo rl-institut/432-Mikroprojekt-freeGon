@@ -623,7 +623,7 @@ def main():
             pypsa_lines_germany_count=pypsa_eur_lines_germany_count,
             fifty_hertz_lines_germany_count=fifty_hertz_lines_germany_count,
             tennet_lines_germany_count=tennet_lines_germany_count,
-            detect_connections=True  # Enable automatic connection detection
+            detect_connections=True  ## Enable automatic connection detection
         )
 
         logger.info(f"Comprehensive map saved to {map_file}")

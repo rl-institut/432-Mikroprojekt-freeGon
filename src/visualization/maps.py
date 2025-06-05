@@ -1070,7 +1070,7 @@ def create_comprehensive_map(dlr_lines, network_lines, matches_dlr, pypsa_lines=
 </html>
     """
 
-    # Ensure output directory exists
+    # #Ensure output directory exists
     os.makedirs(os.path.dirname(os.path.abspath(output_file)), exist_ok=True)
 
     # Write HTML to file
