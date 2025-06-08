@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 from src.utils.topology import reconnect_segments
 
 
+
 def add_connection_notification_to_html(html_file):
     """
     Add a fixed notification about the special connection that doesn't rely on JavaScript.
@@ -76,6 +77,9 @@ def add_connection_notification_to_html(html_file):
         logger.error(f"Error adding connection notification to HTML: {e}")
         return False
 
+def _coords_from_linestring(linestring):
+    # Leaflet order is [lat, lon] == [y, x]
+    return [[y, x] for x, y in linestring.coords]
 
 def create_comprehensive_map(dlr_lines, network_lines, matches_dlr, pypsa_lines=None, pypsa_lines_new=None,
                              matches_pypsa=None, matches_pypsa_new=None, fifty_hertz_lines=None, tennet_lines=None,
