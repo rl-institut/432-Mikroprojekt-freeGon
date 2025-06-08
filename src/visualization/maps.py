@@ -208,68 +208,59 @@ def create_comprehensive_map(dlr_lines, network_lines, matches_dlr, pypsa_lines=
 
     # Process DLR lines
     dlr_lines_data = []
-    if dlr_lines is not None and not dlr_lines.empty:
-        for idx, row in dlr_lines.iterrows():
-            if row.geometry is None or row.geometry.is_empty:
-                continue
+    for idx, row in dlr_lines.iterrows():
+        geom = row.geometry
+        if geom is None or geom.is_empty:
+            continue
 
-            line_id = str(row.get('id', idx))
-            is_matched = line_id in matched_dlr_ids
+        line_id = str(row.get("id", idx))
+        is_matched = line_id in matched_dlr_ids
 
-            # Extract coordinates
-            coords = []
-            try:
-                if row.geometry.geom_type == 'MultiLineString':
-                    for segment in row.geometry.geoms:
-                        segment_coords = [[y, x] for x, y in segment.coords]
-                        coords.extend(segment_coords)
-                else:  # LineString
-                    coords = [[y, x] for x, y in row.geometry.coords]
-            except:
-                continue
+        if geom.geom_type == "MultiLineString":
+            # KEEP segments separated ➜ list-of-lists
+            coords = [_coords_from_linestring(seg) for seg in geom.geoms]
+        else:  # LineString
+            coords = _coords_from_linestring(geom)
 
-            if not coords:
-                continue
+        # skip degenerate geometries
+        if not coords:
+            continue
 
-            # Add line to data
-            dlr_lines_data.append({
-                'id': line_id,
-                'is_matched': is_matched,
-                'coords': coords,
-                'v_nom': str(row.get('v_nom', 'N/A'))
-            })
+        dlr_lines_data.append({
+            "id": line_id,
+            "is_matched": is_matched,
+            "coords": coords,  # ← now nested for MultiLS
+            "v_nom": str(row.get("v_nom", "N/A")),
+        })
 
     # Process Network lines
     network_lines_data = []
     if network_lines is not None and not network_lines.empty:
         for idx, row in network_lines.iterrows():
-            if row.geometry is None or row.geometry.is_empty:
+            geom = row.geometry
+            if geom is None or geom.is_empty:
                 continue
 
             line_id = str(row.get('id', idx))
             is_matched = line_id in all_matched_network_ids
 
-            # Extract coordinates
-            coords = []
-            try:
-                if row.geometry.geom_type == 'MultiLineString':
-                    for segment in row.geometry.geoms:
-                        segment_coords = [[y, x] for x, y in segment.coords]
-                        coords.extend(segment_coords)
-                else:  # LineString
-                    coords = [[y, x] for x, y in row.geometry.coords]
-            except:
-                continue
+            # ──────────────────────────────────────────────────────────
+            # NEW - keep MultiLineString segments separate
+            # ──────────────────────────────────────────────────────────
+            if geom.geom_type == "MultiLineString":
+                coords = [_coords_from_linestring(seg) for seg in geom.geoms]
+            else:  # a simple LineString
+                coords = _coords_from_linestring(geom)
+            # ──────────────────────────────────────────────────────────
 
             if not coords:
                 continue
 
-            # Add line to data
             network_lines_data.append({
-                'id': line_id,
-                'is_matched': is_matched,
-                'coords': coords,
-                'v_nom': str(row.get('v_nom', 'N/A'))
+                "id": line_id,
+                "is_matched": is_matched,
+                "coords": coords,  # ← now nested when needed
+                "v_nom": str(row.get("v_nom", "N/A")),
             })
 
     # Process PyPSA lines
