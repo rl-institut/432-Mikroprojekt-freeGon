@@ -281,6 +281,32 @@ def create_directories(config):
         os.makedirs(os.path.join(config['paths']['output']['charts_dir'], dataset), exist_ok=True)
 
 
+import os, logging
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+def export_results(df, output_file, index=False):
+    """
+    Write *df* to CSV.  Creates the parent directory if needed and turns
+    any Shapely geometry column into WKT strings.
+    """
+    try:
+        # make sure the destination exists
+        Path(output_file).parent.mkdir(parents=True, exist_ok=True)
+
+        # serialise geometry if present
+        if "geometry" in df.columns:
+            df = df.copy()
+            df["geometry"] = df["geometry"].apply(
+                lambda g: g.wkt if g is not None else ""
+            )
+
+        df.to_csv(output_file, index=index)
+        logger.info(f"✔ results written to {output_file}")
+    except Exception as e:
+        logger.error(f"✖ could not save {output_file}: {e}")
+        raise
 
 
 
@@ -471,32 +497,36 @@ def main():
     final_matches_dlr = match_lines_detailed(
         dlr_lines,
         network_lines,
-        buffer_distance=0.020,
-        snap_distance=0.009,
-        direction_threshold=0.65,
+        buffer_distance=0.05,  # ≈ 5 km each side
+        snap_distance=0.02,  # ≈ 2 km endpoint snap
+        direction_threshold=0.0,  # disable while debugging
         enforce_voltage_matching=False,
-        dataset_name="DLR",
         merge_segments=True,
-        max_matches_per_source=20  # Limit to 20 matches per source line
     )
 
     # Process DLR matches
-    if not final_matches_dlr.empty:
-        if 'dlr_id' in final_matches_dlr.columns:
-            all_matched_dlr_ids = set(final_matches_dlr['dlr_id'].astype(str))
-        if 'network_id' in final_matches_dlr.columns:
-            all_matched_network_ids.update(set(final_matches_dlr['network_id'].astype(str)))
+    export_file = os.path.join(
+        config['paths']['output']['matches_dir'],
+        'matched_dlr_lines.csv'
+    )
+    export_results(final_matches_dlr, output_file=export_file)
 
-        # Export results
-        export_file = os.path.join(config['paths']['output']['matches_dir'], 'matched_dlr_lines.csv')
-        export_results(final_matches_dlr, output_file=export_file)
+    if final_matches_dlr.empty:
+        logger.warning("DLR matcher returned 0 rows – wrote empty CSV")
+    else:
+        # update ID sets
+        all_matched_dlr_ids = set(final_matches_dlr['dlr_id'].astype(str))
+        all_matched_network_ids.update(
+            set(final_matches_dlr['network_id'].astype(str))
+        )
 
-        # Generate charts if not skipped
+        # charts
         if not args.skip_visualizations:
             generate_parameter_comparison_charts(
                 final_matches_dlr,
                 dataset_name='DLR',
-                output_dir=os.path.join(config['paths']['output']['charts_dir'], 'dlr')
+                output_dir=os.path.join(
+                    config['paths']['output']['charts_dir'], 'dlr')
             )
 
     # Match PyPSA-EUR lines if available
