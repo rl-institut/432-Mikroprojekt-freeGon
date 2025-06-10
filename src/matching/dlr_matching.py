@@ -159,7 +159,7 @@ def _length_km(geom) -> float:
 
 # -----------------------------------------------------------------------------
 
-TOL = 3000.0      # metres  (tune later)
+TOL = 500.0      # metres  (tune later)
 
 def _overlap_km(src_geom, net_geom) -> float:
     """
@@ -181,7 +181,7 @@ def match_lines_detailed(
     buffer_distance: float = 0.05,   # degrees – converted internally
     snap_distance:   float = 0.010,  # degrees – converted internally
     direction_threshold: float = 0.65,
-    enforce_voltage_matching: bool = False,
+    enforce_voltage_matching: bool = True,
     dataset_name: str = "DLR",
     merge_segments: bool = True,
     max_matches_per_source: int = 20,
@@ -329,6 +329,13 @@ def match_lines_detailed(
         return pd.DataFrame()
 
     df = pd.DataFrame(matches)
+    all_ids = (
+        df.groupby("dlr_id")["network_id"]
+        .apply(lambda s: ",".join(sorted(set(s.astype(str)))))
+        .rename("all_network_ids")
+        .reset_index()
+    )
+    df = df.merge(all_ids, on="dlr_id", how="left")
 
     # one best match per network segment -------------------------------
     df.sort_values("overlap_km", ascending=False, inplace=True)
