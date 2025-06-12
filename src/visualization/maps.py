@@ -81,6 +81,22 @@ def _coords_from_linestring(linestring):
     # Leaflet order is [lat, lon] == [y, x]
     return [[y, x] for x, y in linestring.coords]
 
+
+def _best_match_table(*match_dfs):
+    table = {}
+    for df in match_dfs:
+        if df is None or df.empty:
+            continue
+        ranked = (df.sort_values(["network_id", "overlap_km"],
+                                 ascending=[True, False]))
+        for net_id, grp in ranked.groupby("network_id", sort=False):
+            table.setdefault(str(net_id), []).extend(
+                grp["dlr_id"].astype(str)
+            )
+    return table
+
+
+
 def create_comprehensive_map(dlr_lines, network_lines, matches_dlr, pypsa_lines=None, pypsa_lines_new=None,
                              matches_pypsa=None, matches_pypsa_new=None, fifty_hertz_lines=None, tennet_lines=None,
                              matches_fifty_hertz=None, matches_tennet=None, germany_gdf=None,
@@ -148,7 +164,7 @@ def create_comprehensive_map(dlr_lines, network_lines, matches_dlr, pypsa_lines=
     # Otherwise extract from dataframes
     else:
         # Process matches_dlr
-        if matches_dlr is not None and len(matches_dlr) > 0:
+        if matches_dlr is not None and not matches_dlr.empty:
             if 'dlr_id' in matches_dlr.columns and 'network_id' in matches_dlr.columns:
                 # Convert to strings for consistent comparison
                 matches_dlr['dlr_id'] = matches_dlr['dlr_id'].astype(str)
@@ -158,7 +174,7 @@ def create_comprehensive_map(dlr_lines, network_lines, matches_dlr, pypsa_lines=
                 all_matched_network_ids.update(network_ids)
 
         # Similarly process other match dataframes
-        if matches_pypsa is not None and len(matches_pypsa) > 0:
+        if matches_pypsa is not None and not matches_pypsa.empty:
             if 'dlr_id' in matches_pypsa.columns and 'network_id' in matches_pypsa.columns:
                 matches_pypsa['dlr_id'] = matches_pypsa['dlr_id'].astype(str)
                 matches_pypsa['network_id'] = matches_pypsa['network_id'].astype(str)
@@ -166,7 +182,7 @@ def create_comprehensive_map(dlr_lines, network_lines, matches_dlr, pypsa_lines=
                 network_ids = set(matches_pypsa['network_id'])
                 all_matched_network_ids.update(network_ids)
 
-        if matches_fifty_hertz is not None and len(matches_fifty_hertz) > 0:
+        if matches_fifty_hertz is not None and not matches_fifty_hertz.empty:
             if 'dlr_id' in matches_fifty_hertz.columns and 'network_id' in matches_fifty_hertz.columns:
                 matches_fifty_hertz['dlr_id'] = matches_fifty_hertz['dlr_id'].astype(str)
                 matches_fifty_hertz['network_id'] = matches_fifty_hertz['network_id'].astype(str)
@@ -174,7 +190,7 @@ def create_comprehensive_map(dlr_lines, network_lines, matches_dlr, pypsa_lines=
                 network_ids = set(matches_fifty_hertz['network_id'])
                 all_matched_network_ids.update(network_ids)
 
-        if matches_tennet is not None and len(matches_tennet) > 0:
+        if matches_tennet is not None and not matches_tennet.empty:
             if 'dlr_id' in matches_tennet.columns and 'network_id' in matches_tennet.columns:
                 matches_tennet['dlr_id'] = matches_tennet['dlr_id'].astype(str)
                 matches_tennet['network_id'] = matches_tennet['network_id'].astype(str)
@@ -208,6 +224,14 @@ def create_comprehensive_map(dlr_lines, network_lines, matches_dlr, pypsa_lines=
     _collect_matches(matches_fifty_hertz,fifty_matches, network_matches)
     _collect_matches(matches_tennet,     tennet_matches,network_matches)
 
+    def _best_of(dct):
+        """return {key: first_item_of_value_list}"""
+        return {k: v[0] for k, v in dct.items() if v}
+
+    dlr_best = _best_of(dlr_matches)  # DLR  → best Network
+    pypsa_best = _best_of(pypsa_matches)  # PyPSA→ best Network
+    net_best = _best_of(network_matches)  # Network→ best DLR / PyPSA
+
 
     # Calculate match statistics
     dlr_matched_count = len(matched_dlr_ids)
@@ -234,10 +258,14 @@ def create_comprehensive_map(dlr_lines, network_lines, matches_dlr, pypsa_lines=
     logger.info("Processing lines for map display...")
     net_to_matches = {}
 
-    # DLR → Network
     if matches_dlr is not None and not matches_dlr.empty:
-        for net_id, grp in matches_dlr.groupby("network_id"):
-            net_to_matches[str(net_id)] = sorted(grp["dlr_id"].astype(str))
+        # sort so the first row of every network_id is the largest overlap
+        ranked = (matches_dlr
+                  .sort_values(["network_id", "overlap_km"],
+                               ascending=[True, False]))
+
+        for net_id, grp in ranked.groupby("network_id", sort=False):
+            net_to_matches[str(net_id)] = list(grp["dlr_id"].astype(str))
 
     # PyPSA → Network
     if matches_pypsa is not None and not matches_pypsa.empty:
@@ -263,169 +291,96 @@ def create_comprehensive_map(dlr_lines, network_lines, matches_dlr, pypsa_lines=
     # Process DLR lines
     dlr_lines_data = []
     for idx, row in dlr_lines.iterrows():
-        geom = row.geometry
-        if geom is None or geom.is_empty:
+        g = row.geometry
+        if g is None or g.is_empty:
             continue
 
-        line_id = str(row.get("id", idx))
-        is_matched = line_id in matched_dlr_ids
-
-        if geom.geom_type == "MultiLineString":
-            # KEEP segments separated ➜ list-of-lists
-            coords = [_coords_from_linestring(seg) for seg in geom.geoms]
-        else:  # LineString
-            coords = _coords_from_linestring(geom)
-
-        # skip degenerate geometries
+        coords = [_coords_from_linestring(seg) for seg in g.geoms] \
+            if g.geom_type == "MultiLineString" else _coords_from_linestring(g)
         if not coords:
             continue
 
+        line_id = str(row.get("id", idx))
         dlr_lines_data.append({
             "id": line_id,
-            "is_matched": is_matched,
-            "coords": coords,
+            "best": dlr_best.get(line_id, ""),
+            "is_matched": line_id in matched_dlr_ids,
             "v_nom": str(row.get("v_nom", "N/A")),
-            "s_nom": str(row.get("s_nom", row.get("s_nom_opt", "N/A"))),
+            "s_nom": str(row.get("s_nom", "N/A")),
             "r": str(row.get("r", "N/A")),
             "x": str(row.get("x", "N/A")),
             "b": str(row.get("b", "N/A")),
-            "matches": dlr_matches.get(line_id, [])
+            "matches": net_to_matches.get(line_id, [])[:1],  # ★ take first only
+            "coords": coords
         })
 
-    # Process Network lines
+    # -------------------------------------------------------------------
+    # 2️⃣  Network lines
+    # -------------------------------------------------------------------
     network_lines_data = []
-    if network_lines is not None and not network_lines.empty:
-        for idx, row in network_lines.iterrows():
-            geom = row.geometry
-            if geom is None or geom.is_empty:
-                continue
+    for idx, row in network_lines.iterrows():
+        g = row.geometry
+        if g is None or g.is_empty:
+            continue
 
-            line_id = str(row.get('id', idx))
-            is_matched = line_id in all_matched_network_ids
+        coords = [_coords_from_linestring(seg) for seg in g.geoms] \
+            if g.geom_type == "MultiLineString" else _coords_from_linestring(g)
+        if not coords:
+            continue
 
-            # ──────────────────────────────────────────────────────────
-            # NEW - keep MultiLineString segments separate
-            # ──────────────────────────────────────────────────────────
-            if geom.geom_type == "MultiLineString":
-                coords = [_coords_from_linestring(seg) for seg in geom.geoms]
-            else:  # a simple LineString
-                coords = _coords_from_linestring(geom)
-            # ──────────────────────────────────────────────────────────
+        line_id = str(row.get("id", idx))
+        network_lines_data.append({
+            "id": line_id,
+            "best": net_best.get(line_id, ""),
+            "is_matched": line_id in all_matched_network_ids,
+            "v_nom": str(row.get("v_nom", "N/A")),
+            "s_nom": str(row.get("s_nom", "N/A")),
+            "r": str(row.get("r", "N/A")),
+            "x": str(row.get("x", "N/A")),
+            "b": str(row.get("b", "N/A")),
+            "matches": net_to_matches.get(line_id, [])[:1],  # ★ take first only
+            "coords": coords
+        })
 
-            if not coords:
-                continue
-
-            network_lines_data.append({
-                "id": line_id,
-                "is_matched": is_matched,
-                "coords": coords,  # list / list-of-lists
-                "v_nom": str(row.get("v_nom", row.get("voltage", "N/A"))),
-                "s_nom": float(row.get("s_nom", 0) or 0),
-                "r": float(row.get("r_per_km", row.get("r", 0)) or 0),
-                "x": float(row.get("x_per_km", row.get("x", 0)) or 0),
-                "b": float(row.get("b_per_km", row.get("b", 0)) or 0),
-                # NEW ↓
-                "matches": net_to_matches.get(line_id, [])
-            })
-
-    # Process PyPSA lines
+    # -------------------------------------------------------------------
+    # 3️⃣  PyPSA-EUR lines
+    # -------------------------------------------------------------------
     pypsa_lines_data = []
     if pypsa_lines is not None and not pypsa_lines.empty:
         for idx, row in pypsa_lines.iterrows():
-            if row.geometry is None or row.geometry.is_empty:
+            g = row.geometry
+            if g is None or g.is_empty:
                 continue
-
-            line_id = str(row.get('id', idx))
-            is_matched = line_id in matched_pypsa_eur_ids
-
-            # Extract coordinates
-            coords = []
-            try:
-                if row.geometry.geom_type == 'MultiLineString':
-                    for segment in row.geometry.geoms:
-                        segment_coords = [[y, x] for x, y in segment.coords]
-                        coords.extend(segment_coords)
-                else:  # LineString
-                    coords = [[y, x] for x, y in row.geometry.coords]
-            except:
-                continue
-
+            coords = [_coords_from_linestring(seg) for seg in g.geoms] \
+                if g.geom_type == "MultiLineString" else _coords_from_linestring(g)
             if not coords:
                 continue
 
-            # Add line to data
+            line_id = str(row.get("id", idx))
             pypsa_lines_data.append({
-                'id': line_id,
-                'is_matched': is_matched,
-                'coords': coords,
-                'v_nom': str(row.get('v_nom', row.get('voltage', 'N/A')))
+                "id": line_id,
+                "best": pypsa_best.get(line_id, ""),
+                "is_matched": line_id in matched_pypsa_eur_ids,
+                "v_nom": str(row.get("v_nom", row.get("voltage", "N/A"))),
+                "s_nom": str(row.get("s_nom", "N/A")),
+                "r": str(row.get("r", "N/A")),
+                "x": str(row.get("x", "N/A")),
+                "b": str(row.get("b", "N/A")),
+                "matches": net_to_matches.get(line_id, [])[:1],
+                "coords": coords
             })
 
-    # Process 50Hertz lines
+    # -------------------------------------------------------------------
+    # 4️⃣  50 Hertz lines
+    # -------------------------------------------------------------------
     fifty_hertz_lines_data = []
-    if fifty_hertz_lines is not None and not fifty_hertz_lines.empty:
-        for idx, row in fifty_hertz_lines.iterrows():
-            if row.geometry is None or row.geometry.is_empty:
-                continue
 
-            line_id = str(row.get('id', idx))
-            is_matched = line_id in matched_fifty_hertz_ids
 
-            # Extract coordinates
-            coords = []
-            try:
-                if row.geometry.geom_type == 'MultiLineString':
-                    for segment in row.geometry.geoms:
-                        segment_coords = [[y, x] for x, y in segment.coords]
-                        coords.extend(segment_coords)
-                else:  # LineString
-                    coords = [[y, x] for x, y in row.geometry.coords]
-            except:
-                continue
-
-            if not coords:
-                continue
-
-            # Add line to data
-            fifty_hertz_lines_data.append({
-                'id': line_id,
-                'is_matched': is_matched,
-                'coords': coords,
-                'v_nom': str(row.get('v_nom', 'N/A'))
-            })
-
-    # Process TenneT lines
+    # -------------------------------------------------------------------
+    # 5️⃣  TenneT lines
+    # -------------------------------------------------------------------
     tennet_lines_data = []
-    if tennet_lines is not None and not tennet_lines.empty:
-        for idx, row in tennet_lines.iterrows():
-            if row.geometry is None or row.geometry.is_empty:
-                continue
 
-            line_id = str(row.get('id', idx))
-            is_matched = line_id in matched_tennet_ids
-
-            # Extract coordinates
-            coords = []
-            try:
-                if row.geometry.geom_type == 'MultiLineString':
-                    for segment in row.geometry.geoms:
-                        segment_coords = [[y, x] for x, y in segment.coords]
-                        coords.extend(segment_coords)
-                else:  # LineString
-                    coords = [[y, x] for x, y in row.geometry.coords]
-            except:
-                continue
-
-            if not coords:
-                continue
-
-            # Add line to data
-            tennet_lines_data.append({
-                'id': line_id,
-                'is_matched': is_matched,
-                'coords': coords,
-                'v_nom': str(row.get('v_nom', 'N/A'))
-            })
 
     # Create JSON data for JavaScript
     map_data = {
@@ -739,16 +694,20 @@ def create_comprehensive_map(dlr_lines, network_lines, matches_dlr, pypsa_lines=
             const popupContent = `
     <div style="min-width:220px;">
         <h4>DLR Line ${{line.id}}</h4>
+
         <p><b>Status:</b> ${{line.is_matched ? 'Matched' : 'Unmatched'}}</p>
         <p><b>Voltage:</b> ${{line.v_nom}} kV</p>
         <p><b>s<sub>nom</sub>:</b> ${{line.s_nom}} MW</p>
+
         <p><b>r / x / b&nbsp;per km:</b><br>
            ${{line.r}} Ω&nbsp;/&nbsp;${{line.x}} Ω&nbsp;/&nbsp;${{line.b}} S
         </p>
-        ${{line.matches.length
-            ? `<p><b>Matches:</b> ${{line.matches.join(', ')}}</p>`
+
+        ${{line.best
+            ? `<p><b>Best&nbsp;match:</b> ${{line.best}}</p>`
             : ''}}
     </div>`;
+
             polyline.bindPopup(popupContent);
 
             // Store line for filtering
@@ -788,16 +747,21 @@ def create_comprehensive_map(dlr_lines, network_lines, matches_dlr, pypsa_lines=
 
             const popupContent = `
     <div style="min-width:220px;">
-        <h4>Network Line ${{line.id}}</h4>         <!-- change “Network” to PyPSA / etc. -->
+        <h4>Network Line ${{line.id}}</h4>
+
         <p><b>Status:</b> ${{line.is_matched ? 'Matched' : 'Unmatched'}}</p>
         <p><b>Voltage:</b> ${{line.v_nom}} kV</p>
         <p><b>s<sub>nom</sub>:</b> ${{line.s_nom}} MW</p>
+
         <p><b>r / x / b&nbsp;per km:</b><br>
-           ${{line.r}} Ω&nbsp;/&nbsp;${{line.x}} Ω&nbsp;/&nbsp;${{line.b}} S</p>
-        ${{(line.matches && line.matches.length)
-            ? `<p><b>Matches:</b> ${{line.matches.join(', ')}}</p>`
+           ${{line.r}} Ω&nbsp;/&nbsp;${{line.x}} Ω&nbsp;/&nbsp;${{line.b}} S
+        </p>
+
+        ${{line.best
+            ? `<p><b>Best&nbsp;match:</b> ${{line.best}}</p>`
             : ''}}
     </div>`;
+
 
             polyline.bindPopup(popupContent);
 
@@ -838,12 +802,22 @@ def create_comprehensive_map(dlr_lines, network_lines, matches_dlr, pypsa_lines=
             polyline.bindTooltip(tooltip);
 
             const popupContent = `
-                <div style="min-width: 200px;">
-                    <h4>PyPSA Line ${{line.id}}</h4>
-                    <p><b>Status:</b> ${{line.is_matched ? 'Matched' : 'Unmatched'}}</p>
-                    <p><b>Voltage:</b> ${{line.v_nom}} kV</p>
-                </div>
-            `;
+    <div style="min-width:220px;">
+        <h4>PyPSA Line ${{line.id}}</h4>
+
+        <p><b>Status:</b> ${{line.is_matched ? 'Matched' : 'Unmatched'}}</p>
+        <p><b>Voltage:</b> ${{line.v_nom}} kV</p>
+        <p><b>s<sub>nom</sub>:</b> ${{line.s_nom}} MW</p>
+
+        <p><b>r / x / b&nbsp;per km:</b><br>
+           ${{line.r}} Ω&nbsp;/&nbsp;${{line.x}} Ω&nbsp;/&nbsp;${{line.b}} S
+        </p>
+
+        ${{line.best
+            ? `<p><b>Best&nbsp;match:</b> ${{line.best}}</p>`
+            : ''}}
+    </div>`;
+
             polyline.bindPopup(popupContent);
 
             // Store line for filtering
@@ -882,12 +856,21 @@ def create_comprehensive_map(dlr_lines, network_lines, matches_dlr, pypsa_lines=
             polyline.bindTooltip(tooltip);
 
             const popupContent = `
-                <div style="min-width: 200px;">
-                    <h4>50Hertz Line ${{line.id}}</h4>
-                    <p><b>Status:</b> ${{line.is_matched ? 'Matched' : 'Unmatched'}}</p>
-                    <p><b>Voltage:</b> ${{line.v_nom}} kV</p>
-                </div>
-            `;
+    <div style="min-width:220px;">
+        <h4>50Hertz Line ${{line.id}}</h4>
+
+        <p><b>Status:</b> ${{line.is_matched ? 'Matched' : 'Unmatched'}}</p>
+        <p><b>Voltage:</b> ${{line.v_nom}} kV</p>
+        <p><b>s<sub>nom</sub>:</b> ${{line.s_nom}} MW</p>
+
+        <p><b>r / x / b&nbsp;per km:</b><br>
+           ${{line.r}} Ω&nbsp;/&nbsp;${{line.x}} Ω&nbsp;/&nbsp;${{line.b}} S
+        </p>
+
+        ${{(line.matches && line.matches.length)
+            ? `<p><b>Match&nbsp;ID:</b> ${{line.matches[0]}}</p>`
+            : ''}}
+    </div>`;
             polyline.bindPopup(popupContent);
 
             // Store line for filtering
@@ -926,13 +909,21 @@ def create_comprehensive_map(dlr_lines, network_lines, matches_dlr, pypsa_lines=
             polyline.bindTooltip(tooltip);
 
             const popupContent = `
-                <div style="min-width: 200px;">
-                    <h4>TenneT Line ${{line.id}}</h4>
-                    <p><b>Status:</b> ${{line.is_matched ? 'Matched' : 'Unmatched'}}</p>
-                    <p><b>Voltage:</b> ${{line.v_nom}} kV</p>
-                </div>
-            `;
-            polyline.bindPopup(popupContent);
+    <div style="min-width:220px;">
+        <h4>Tennet Line ${{line.id}}</h4>
+
+        <p><b>Status:</b> ${{line.is_matched ? 'Matched' : 'Unmatched'}}</p>
+        <p><b>Voltage:</b> ${{line.v_nom}} kV</p>
+        <p><b>s<sub>nom</sub>:</b> ${{line.s_nom}} MW</p>
+
+        <p><b>r / x / b&nbsp;per km:</b><br>
+           ${{line.r}} Ω&nbsp;/&nbsp;${{line.x}} Ω&nbsp;/&nbsp;${{line.b}} S
+        </p>
+
+        ${{(line.matches && line.matches.length)
+            ? `<p><b>Match&nbsp;ID:</b> ${{line.matches[0]}}</p>`
+            : ''}}
+    </div>`;
 
             // Store line for filtering
             lineCollections[category].push(polyline);

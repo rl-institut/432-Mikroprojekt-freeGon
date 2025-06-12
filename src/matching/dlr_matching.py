@@ -32,6 +32,9 @@ from shapely.geometry import LineString, MultiLineString, Point
 METRIC_CRS            = 3035          # metric projection for Europe
 TOL                   = 700           # corridor half-width  (metres)
 MAX_DLR_OVERRUN       = 1.15          # at most +15 % of dlr_length allocated
+MIN_SHARE_ABS   =  2_000   # metres  – we want at least 2 km overlap
+MIN_SHARE_REL   =  0.10    #       – or ≥ 10 % of dlr_length, whichever is bigger
+
 
 logger = logging.getLogger(__name__)
 
@@ -288,8 +291,16 @@ def match_lines_detailed(                           #  ⟸  *unchanged*
 
                 acc, acc_len = [], 0.0
                 for _, r in grp.iterrows():
+
+                    # -------- NEW: minimum useful overlap --------------------------
+                    if (r.ov_km * 1_000 < MIN_SHARE_ABS) or (r.ov_km < s_len * MIN_SHARE_REL):
+                        continue
+                    # ----------------------------------------------------------------
+
+                    # existing length-cap
                     if acc_len + r.ov_km > s_len * MAX_DLR_OVERRUN:
                         continue
+
                     acc.append(r)
                     acc_len += r.ov_km
 
