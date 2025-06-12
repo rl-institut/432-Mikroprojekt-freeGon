@@ -495,14 +495,15 @@ def main():
     logger.info("Matching DLR lines...")
     dlr_config = config['matching']['dlr']
     final_matches_dlr = match_lines_detailed(
-        dlr_lines,
-        network_lines,
-        buffer_distance=0.05,  # ≈ 5 km each side
-        snap_distance=0.02,  # ≈ 2 km endpoint snap
-        direction_threshold=0.0,  # disable while debugging
-        enforce_voltage_matching=False,
-        merge_segments=True,
-    )
+    dlr_lines,
+    network_lines,
+    buffer_distance=0.05,
+    snap_distance=0.009,
+    direction_threshold=0.65,
+    enforce_voltage_matching=False,
+    merge_segments=True,
+)
+
 
     # Process DLR matches
     export_file = os.path.join(
