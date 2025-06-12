@@ -182,6 +182,33 @@ def create_comprehensive_map(dlr_lines, network_lines, matches_dlr, pypsa_lines=
                 network_ids = set(matches_tennet['network_id'])
                 all_matched_network_ids.update(network_ids)
 
+    # ------------------------------------------------------------------
+    # 1. Build {dlr_id: [network_id,…]}, {network_id: [dlr_id,…]}, …
+    # ------------------------------------------------------------------
+    dlr_matches, network_matches  = {}, {}
+    pypsa_matches, fifty_matches, tennet_matches = {}, {}, {}
+
+    def _add_pair(a_dict, a_id, b_id):
+        if a_id not in a_dict:
+            a_dict[a_id] = []
+        if b_id not in a_dict[a_id]:
+            a_dict[a_id].append(b_id)
+
+    def _collect_matches(df, a_dict, b_dict):
+        if df is None or df.empty:
+            return
+        for _, r in df.iterrows():
+            a_id = str(r["dlr_id"])
+            b_id = str(r["network_id"])
+            _add_pair(a_dict, a_id, b_id)
+            _add_pair(b_dict, b_id, a_id)
+
+    _collect_matches(matches_dlr,        dlr_matches,   network_matches)
+    _collect_matches(matches_pypsa,      pypsa_matches, network_matches)
+    _collect_matches(matches_fifty_hertz,fifty_matches, network_matches)
+    _collect_matches(matches_tennet,     tennet_matches,network_matches)
+
+
     # Calculate match statistics
     dlr_matched_count = len(matched_dlr_ids)
     dlr_unmatched_count = dlr_lines_germany_count - dlr_matched_count
@@ -205,6 +232,33 @@ def create_comprehensive_map(dlr_lines, network_lines, matches_dlr, pypsa_lines=
 
     # Process lines for the map
     logger.info("Processing lines for map display...")
+    net_to_matches = {}
+
+    # DLR → Network
+    if matches_dlr is not None and not matches_dlr.empty:
+        for net_id, grp in matches_dlr.groupby("network_id"):
+            net_to_matches[str(net_id)] = sorted(grp["dlr_id"].astype(str))
+
+    # PyPSA → Network
+    if matches_pypsa is not None and not matches_pypsa.empty:
+        for net_id, grp in matches_pypsa.groupby("network_id"):
+            net_to_matches.setdefault(str(net_id), []).extend(
+                grp["dlr_id"].astype(str)
+            )
+
+    # 50 Hertz → Network
+    if matches_fifty_hertz is not None and not matches_fifty_hertz.empty:
+        for net_id, grp in matches_fifty_hertz.groupby("network_id"):
+            net_to_matches.setdefault(str(net_id), []).extend(
+                grp["dlr_id"].astype(str)
+            )
+
+    # TenneT → Network
+    if matches_tennet is not None and not matches_tennet.empty:
+        for net_id, grp in matches_tennet.groupby("network_id"):
+            net_to_matches.setdefault(str(net_id), []).extend(
+                grp["dlr_id"].astype(str)
+            )
 
     # Process DLR lines
     dlr_lines_data = []
@@ -229,8 +283,13 @@ def create_comprehensive_map(dlr_lines, network_lines, matches_dlr, pypsa_lines=
         dlr_lines_data.append({
             "id": line_id,
             "is_matched": is_matched,
-            "coords": coords,  # ← now nested for MultiLS
+            "coords": coords,
             "v_nom": str(row.get("v_nom", "N/A")),
+            "s_nom": str(row.get("s_nom", row.get("s_nom_opt", "N/A"))),
+            "r": str(row.get("r", "N/A")),
+            "x": str(row.get("x", "N/A")),
+            "b": str(row.get("b", "N/A")),
+            "matches": dlr_matches.get(line_id, [])
         })
 
     # Process Network lines
@@ -259,8 +318,14 @@ def create_comprehensive_map(dlr_lines, network_lines, matches_dlr, pypsa_lines=
             network_lines_data.append({
                 "id": line_id,
                 "is_matched": is_matched,
-                "coords": coords,  # ← now nested when needed
-                "v_nom": str(row.get("v_nom", "N/A")),
+                "coords": coords,  # list / list-of-lists
+                "v_nom": str(row.get("v_nom", row.get("voltage", "N/A"))),
+                "s_nom": float(row.get("s_nom", 0) or 0),
+                "r": float(row.get("r_per_km", row.get("r", 0)) or 0),
+                "x": float(row.get("x_per_km", row.get("x", 0)) or 0),
+                "b": float(row.get("b_per_km", row.get("b", 0)) or 0),
+                # NEW ↓
+                "matches": net_to_matches.get(line_id, [])
             })
 
     # Process PyPSA lines
@@ -672,12 +737,18 @@ def create_comprehensive_map(dlr_lines, network_lines, matches_dlr, pypsa_lines=
             polyline.bindTooltip(tooltip);
 
             const popupContent = `
-                <div style="min-width: 200px;">
-                    <h4>DLR Line ${{line.id}}</h4>
-                    <p><b>Status:</b> ${{line.is_matched ? 'Matched' : 'Unmatched'}}</p>
-                    <p><b>Voltage:</b> ${{line.v_nom}} kV</p>
-                </div>
-            `;
+    <div style="min-width:220px;">
+        <h4>DLR Line ${{line.id}}</h4>
+        <p><b>Status:</b> ${{line.is_matched ? 'Matched' : 'Unmatched'}}</p>
+        <p><b>Voltage:</b> ${{line.v_nom}} kV</p>
+        <p><b>s<sub>nom</sub>:</b> ${{line.s_nom}} MW</p>
+        <p><b>r / x / b&nbsp;per km:</b><br>
+           ${{line.r}} Ω&nbsp;/&nbsp;${{line.x}} Ω&nbsp;/&nbsp;${{line.b}} S
+        </p>
+        ${{line.matches.length
+            ? `<p><b>Matches:</b> ${{line.matches.join(', ')}}</p>`
+            : ''}}
+    </div>`;
             polyline.bindPopup(popupContent);
 
             // Store line for filtering
@@ -716,12 +787,18 @@ def create_comprehensive_map(dlr_lines, network_lines, matches_dlr, pypsa_lines=
             polyline.bindTooltip(tooltip);
 
             const popupContent = `
-                <div style="min-width: 200px;">
-                    <h4>Network Line ${{line.id}}</h4>
-                    <p><b>Status:</b> ${{line.is_matched ? 'Matched' : 'Unmatched'}}</p>
-                    <p><b>Voltage:</b> ${{line.v_nom}} kV</p>
-                </div>
-            `;
+    <div style="min-width:220px;">
+        <h4>Network Line ${{line.id}}</h4>         <!-- change “Network” to PyPSA / etc. -->
+        <p><b>Status:</b> ${{line.is_matched ? 'Matched' : 'Unmatched'}}</p>
+        <p><b>Voltage:</b> ${{line.v_nom}} kV</p>
+        <p><b>s<sub>nom</sub>:</b> ${{line.s_nom}} MW</p>
+        <p><b>r / x / b&nbsp;per km:</b><br>
+           ${{line.r}} Ω&nbsp;/&nbsp;${{line.x}} Ω&nbsp;/&nbsp;${{line.b}} S</p>
+        ${{(line.matches && line.matches.length)
+            ? `<p><b>Matches:</b> ${{line.matches.join(', ')}}</p>`
+            : ''}}
+    </div>`;
+
             polyline.bindPopup(popupContent);
 
             // Store line for filtering
