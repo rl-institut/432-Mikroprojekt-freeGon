@@ -2,6 +2,8 @@
 import os
 import argparse
 import logging
+
+# scripts/run_matching.py
 import yaml
 import sys
 import pandas as pd
@@ -21,6 +23,7 @@ from src.data.exporters import export_results
 from src.visualization.charts import generate_parameter_comparison_charts
 from src.visualization.maps import create_comprehensive_map
 from src.data.processors import filter_lines_by_voltage
+from src.matching.hybrid_matching import match_lines_hybrid
 
 logger = logging.getLogger(__name__)
 
@@ -493,24 +496,21 @@ def main():
 
     # Match DLR lines
     logger.info("Matching DLR lines...")
-    dlr_config = config['matching']['dlr']
-    final_matches_dlr = match_lines_detailed(
-    dlr_lines,
-    network_lines,
-    buffer_distance=0.05,
-    snap_distance=0.009,
-    direction_threshold=0.65,
-    enforce_voltage_matching=False,
-    merge_segments=True,
-)
-
+    dlr_cfg = config['matching']['dlr']
+    final_matches_dlr, best_map, net_chord = match_lines_hybrid(
+        dlr_lines,
+        network_lines,
+        cfg=dlr_cfg
+    )
 
     # Process DLR matches
     export_file = os.path.join(
         config['paths']['output']['matches_dir'],
         'matched_dlr_lines.csv'
     )
-    export_results(final_matches_dlr, output_file=export_file)
+    export_results(final_matches_dlr,
+                   output_file=os.path.join(config['paths']['output']['matches_dir'],
+                                            'matched_dlr_lines.csv'))
 
     if final_matches_dlr.empty:
         logger.warning("DLR matcher returned 0 rows – wrote empty CSV")
@@ -565,7 +565,7 @@ def main():
     if fifty_hertz_lines is not None and not fifty_hertz_lines.empty:
         logger.info("Matching 50Hertz lines...")
         fifty_hertz_config = config['matching']['fifty_hertz']
-        final_matches_fifty_hertz = match_fifty_hertz_lines(
+        final_matches_fifty_hertz, _ = match_fifty_hertz_lines(  # ignore “best”
             fifty_hertz_lines,
             network_lines,
             config=fifty_hertz_config
@@ -595,7 +595,7 @@ def main():
     if tennet_lines is not None and not tennet_lines.empty:
         logger.info("Matching TenneT lines...")
         tennet_config = config['matching']['tennet']
-        final_matches_tennet = match_tennet_lines(
+        final_matches_tennet, _ = match_tennet_lines(
             tennet_lines,
             network_lines,
             config=tennet_config
@@ -626,10 +626,13 @@ def main():
 
         map_file = os.path.join(config['paths']['output']['maps_dir'], 'comprehensive_grid_map.html')
 
+        print('CHORDS  ➜', len(net_chord), 'features')
+
         # Create the map with all datasets
         create_comprehensive_map(
             dlr_lines=dlr_lines,
             network_lines=network_lines,
+            network_lines_chord= net_chord,
             matches_dlr=final_matches_dlr if not (final_matches_dlr is None or final_matches_dlr.empty) else None,
             pypsa_lines=pypsa_eur_lines if pypsa_eur_lines_germany_count > 0 else None,
             matches_pypsa=final_matches_pypsa_eur if not (

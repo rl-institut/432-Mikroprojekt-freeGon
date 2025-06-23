@@ -23,10 +23,11 @@ matching:
   filter_voltage: 110.0
 
   dlr:
-    buffer_distance: 0.020
-    snap_distance: 0.009
-    direction_threshold: 0.65
-    enforce_voltage_matching: false
+    buffer_distance: 0.05
+    snap_distance: 0.010
+    direction_threshold: 0.0
+    enforce_voltage_matching: true
+    use_endpoint_filter: false
 
   pypsa_eur:
     # Visual overlap parameters

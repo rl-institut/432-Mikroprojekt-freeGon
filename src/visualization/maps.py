@@ -103,7 +103,7 @@ def create_comprehensive_map(dlr_lines, network_lines, matches_dlr, pypsa_lines=
                              output_file='comprehensive_grid_map.html', matched_ids=None,
                              dlr_lines_germany_count=None, network_lines_germany_count=None,
                              pypsa_lines_germany_count=None, pypsa_lines_new_germany_count=None,
-                             fifty_hertz_lines_germany_count=None, tennet_lines_germany_count=None,
+                             fifty_hertz_lines_germany_count=None, tennet_lines_germany_count=None, network_lines_chord=None,
                              detect_connections=False):
     """
     Create a completely standalone map with no reliance on folium.
@@ -342,6 +342,23 @@ def create_comprehensive_map(dlr_lines, network_lines, matches_dlr, pypsa_lines=
             "coords": coords
         })
 
+    # ---------------------------------------------------
+    # Network “chord” lines (straight connections)
+    # ---------------------------------------------------
+    network_chord_lines_data = []
+    if network_lines_chord is not None and not network_lines_chord.empty:
+        for idx, row in network_lines_chord.iterrows():
+            g = row.geometry
+            if g is None or g.is_empty:
+                continue
+            coords = [_coords_from_linestring(seg) for seg in g.geoms] \
+                if g.geom_type == "MultiLineString" else _coords_from_linestring(g)
+            if coords:
+                network_chord_lines_data.append({
+                    "id": str(row.get("id", idx)),
+                    "coords": coords
+                })
+
     # -------------------------------------------------------------------
     # 3️⃣  PyPSA-EUR lines
     # -------------------------------------------------------------------
@@ -387,6 +404,7 @@ def create_comprehensive_map(dlr_lines, network_lines, matches_dlr, pypsa_lines=
         'center': [centroid_y, centroid_x],
         'dlr_lines': dlr_lines_data,
         'network_lines': network_lines_data,
+        'network_chord_lines': network_chord_lines_data,
         'pypsa_lines': pypsa_lines_data,
         'fifty_hertz_lines': fifty_hertz_lines_data,
         'tennet_lines': tennet_lines_data
@@ -569,6 +587,8 @@ def create_comprehensive_map(dlr_lines, network_lines, matches_dlr, pypsa_lines=
             <label for="filter-network-matched">Matched</label><br>
             <input type="checkbox" id="filter-network-unmatched" checked>
             <label for="filter-network-unmatched">Unmatched</label>
+            <input type="checkbox" id="filter-network-chord"     checked>   <!-- NEW -->
+            <label for="filter-network-chord">Chord&nbsp;(straight)</label>
 
             <h5>PyPSA Lines</h5>
             <input type="checkbox" id="filter-pypsa-matched" checked>
@@ -649,9 +669,25 @@ def create_comprehensive_map(dlr_lines, network_lines, matches_dlr, pypsa_lines=
     <script>
         // Map data from Python
         const mapData = {map_data_json};
+        console.log('Chords received:', mapData.network_chord_lines.length,
+            mapData.network_chord_lines.slice(0,3));
+
 
         // Initialize map
-        const map = L.map('map').setView(mapData.center, 6);
+        // Initialize map
+const map = L.map('map').setView(mapData.center, 6);
+
+/* -------------------------------------------------
+   give chords their own pane so they draw on top
+   ------------------------------------------------- */
+const chordPane = map.createPane('chordPane');
+map.getPane('chordPane').style.zIndex = 650;   // > overlayPane(400)
+
+/* ---- keep exactly ONE tile-layer block, with doubled braces ---- */
+L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
+      attribution: '&copy; OpenStreetMap contributors'
+  }}).addTo(map);
+
 
         // Add tile layer
         L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
@@ -664,6 +700,7 @@ def create_comprehensive_map(dlr_lines, network_lines, matches_dlr, pypsa_lines=
             dlr_unmatched: [],
             network_matched: [],
             network_unmatched: [],
+            network_chord : [],
             pypsa_matched: [],
             pypsa_unmatched: [],
             fifty_hertz_matched: [],
@@ -729,60 +766,68 @@ def create_comprehensive_map(dlr_lines, network_lines, matches_dlr, pypsa_lines=
             }});
         }});
 
-        // Add Network lines
-        mapData.network_lines.forEach(line => {{
-            const color = line.is_matched ? 'orange' : 'red';
-            const weight = line.is_matched ? 3 : 2;
-            const opacity = line.is_matched ? 0.8 : 0.6;
-            const category = 'network_' + (line.is_matched ? 'matched' : 'unmatched');
+        /* ─────────────────────────────────────────────────────────────
+   REAL Network lines (matched / unmatched)
+   ───────────────────────────────────────────────────────────── */
 
-            const polyline = L.polyline(line.coords, {{
-                color: color,
-                weight: weight,
-                opacity: opacity
-            }}).addTo(map);
+mapData.network_lines.forEach(line => {{
+    const color   = line.is_matched ? 'orange' : 'red';
+    const weight  = line.is_matched ? 3        : 2;
+    const opacity = line.is_matched ? 0.8      : 0.6;
+    const category = 'network_' + (line.is_matched ? 'matched' : 'unmatched');
 
-            const tooltip = `Network Line ${{line.id}} ${{line.is_matched ? '(matched)' : '(unmatched)'}} - ${{line.v_nom}} kV`;
-            polyline.bindTooltip(tooltip);
+    const polyline = L.polyline(line.coords, {{
+        color  : color,
+        weight : weight,
+        opacity: opacity
+    }}).addTo(map);
 
-            const popupContent = `
-    <div style="min-width:220px;">
-        <h4>Network Line ${{line.id}}</h4>
+    /* tooltip + popup */
+    polyline.bindTooltip(`Network Line ${{line.id}} ${{line.is_matched ? '(matched)' : '(unmatched)'}} – ${{line.v_nom}} kV`);
 
-        <p><b>Status:</b> ${{line.is_matched ? 'Matched' : 'Unmatched'}}</p>
-        <p><b>Voltage:</b> ${{line.v_nom}} kV</p>
-        <p><b>s<sub>nom</sub>:</b> ${{line.s_nom}} MW</p>
+    const popupContent = `
+        <div style="min-width:220px;">
+            <h4>Network Line ${{line.id}}</h4>
+            <p><b>Status:</b> ${{line.is_matched ? 'Matched' : 'Unmatched'}}</p>
+            <p><b>Voltage:</b> ${{line.v_nom}} kV</p>
+            <p><b>s<sub>nom</sub>:</b> ${{line.s_nom}} MW</p>
+            <p><b>r / x / b&nbsp;per km:</b><br>
+               ${{line.r}} Ω&nbsp;/&nbsp;${{line.x}} Ω&nbsp;/&nbsp;${{line.b}} S
+            </p>
+            ${{line.best ? `<p><b>Best&nbsp;match:</b> ${{line.best}}</p>` : ''}}
+        </div>`;
+    polyline.bindPopup(popupContent);
 
-        <p><b>r / x / b&nbsp;per km:</b><br>
-           ${{line.r}} Ω&nbsp;/&nbsp;${{line.x}} Ω&nbsp;/&nbsp;${{line.b}} S
-        </p>
+    /* keep for filters & search */
+    lineCollections[category].push(polyline);
+    const uid = `network_${{line.id}}`;
+    linesById[uid] = {{ line: polyline, id: line.id, type: 'network',
+                        is_matched: line.is_matched, coords: line.coords }};
+    polyline.on('click', () => highlightLine(uid));
+}});
 
-        ${{line.best
-            ? `<p><b>Best&nbsp;match:</b> ${{line.best}}</p>`
-            : ''}}
-    </div>`;
 
+/* ─────────────────────────────────────────────────────────────
+   Network straight-line “chords”
+   ───────────────────────────────────────────────────────────── */
 
-            polyline.bindPopup(popupContent);
+const chordLayerGroup = L.layerGroup().addTo(map);   // toggled as ONE layer
+lineCollections['network_chord'] = [];               // filter pane entry
 
-            // Store line for filtering
-            lineCollections[category].push(polyline);
+mapData.network_chord_lines.forEach(line => {{
+    const chord = L.polyline(line.coords, {{
+        color  : '#000',    // solid black
+        weight : 2,
+        opacity: 0.9,
+        dashArray : '3,3'       // dotted so it stands out
+    }}).addTo(chordLayerGroup);
 
-            // Store line by ID for search
-            const uniqueId = `network_${{line.id}}`;
-            linesById[uniqueId] = {{
-                line: polyline,
-                id: line.id,
-                type: 'network',
-                is_matched: line.is_matched,
-                coords: line.coords
-            }};
+    chord.bindTooltip(`Chord ${{line.id}}`);
+    lineCollections['network_chord'].push(chord);
+}});
 
-            // Add click handler
-            polyline.on('click', function() {{
-                highlightLine(uniqueId);
-            }});
-        }});
+        
+          
 
         // Add PyPSA lines
         mapData.pypsa_lines.forEach(line => {{
@@ -1073,40 +1118,42 @@ def create_comprehensive_map(dlr_lines, network_lines, matches_dlr, pypsa_lines=
             }}
         }});
 
-        // Filter functionality
-        document.getElementById('apply-filter').addEventListener('click', function() {{
-            // Get checkbox states
-            const filters = {{
-                dlr_matched: document.getElementById('filter-dlr-matched').checked,
-                dlr_unmatched: document.getElementById('filter-dlr-unmatched').checked,
-                network_matched: document.getElementById('filter-network-matched').checked,
-                network_unmatched: document.getElementById('filter-network-unmatched').checked,
-                pypsa_matched: document.getElementById('filter-pypsa-matched').checked,
-                pypsa_unmatched: document.getElementById('filter-pypsa-unmatched').checked,
-                fifty_hertz_matched: document.getElementById('filter-fifty-hertz-matched').checked,
-                fifty_hertz_unmatched: document.getElementById('filter-fifty-hertz-unmatched').checked,
-                tennet_matched: document.getElementById('filter-tennet-matched').checked,
-                tennet_unmatched: document.getElementById('filter-tennet-unmatched').checked
-            }};
+        /* ─── Filter functionality ─────────────────────────────── */
+document.getElementById('apply-filter').addEventListener('click', () => {{
+    /* ① collect checkbox states */
+    const filters = {{
+        dlr_matched          : document.getElementById('filter-dlr-matched').checked,
+        dlr_unmatched        : document.getElementById('filter-dlr-unmatched').checked,
+        network_matched      : document.getElementById('filter-network-matched').checked,
+        network_unmatched    : document.getElementById('filter-network-unmatched').checked,
+        pypsa_matched        : document.getElementById('filter-pypsa-matched').checked,
+        pypsa_unmatched      : document.getElementById('filter-pypsa-unmatched').checked,
+        fifty_hertz_matched  : document.getElementById('filter-fifty-hertz-matched').checked,
+        fifty_hertz_unmatched: document.getElementById('filter-fifty-hertz-unmatched').checked,
+        tennet_matched       : document.getElementById('filter-tennet-matched').checked,
+        tennet_unmatched     : document.getElementById('filter-tennet-unmatched').checked,
+        network_chord        : document.getElementById('filter-network-chord').checked   // ★ NEW
+    }};   /* ← single ‘;’, no extra comma */
 
-            // Apply filters
-            for (const category in filters) {{
-                const show = filters[category];
-                const lines = lineCollections[category] || [];
+    /* ② ordinary layers ---------------------------------- */
+    for (const category in filters) {{
+        if (category === 'network_chord') continue;              // chords later
+        const show  = filters[category];
+        const lines = lineCollections[category] || [];
+        for (const ln of lines) {{
+            if (show) {{ if (!map.hasLayer(ln)) map.addLayer(ln); }}
+            else       {{ if (map.hasLayer(ln)) map.removeLayer(ln); }}
+        }}
+    }}
 
-                for (const line of lines) {{
-                    if (show) {{
-                        if (!map.hasLayer(line)) {{
-                            map.addLayer(line);
-                        }}
-                    }} else {{
-                        if (map.hasLayer(line)) {{
-                            map.removeLayer(line);
-                        }}
-                    }}
-                }}
-            }}
-        }});
+    /* ③ chord LayerGroup --------------------------------- */
+    if (filters.network_chord) {{
+        if (!map.hasLayer(chordLayerGroup)) map.addLayer(chordLayerGroup);
+    }} else {{
+        if (map.hasLayer(chordLayerGroup))  map.removeLayer(chordLayerGroup);
+    }}
+}});   /* ← exactly two braces then ‘);’ */
+
 
         // Reset filters
         document.getElementById('reset-filter').addEventListener('click', function() {{
@@ -1145,4 +1192,3 @@ def create_comprehensive_map(dlr_lines, network_lines, matches_dlr, pypsa_lines=
     # Return dummy folium map for compatibility
     import folium
     return folium.Map(location=[centroid_y, centroid_x], zoom_start=6)
-
