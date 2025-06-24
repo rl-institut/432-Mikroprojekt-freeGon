@@ -6,9 +6,48 @@ from folium.plugins import MeasureControl
 from shapely.geometry import Point, box
 import pandas as pd
 import geopandas as gpd
+
 logger = logging.getLogger(__name__)
 
 from src.utils.topology import reconnect_segments
+
+# ------------------------------------------------------------------
+#  quick helper – build 1 straight-line “chord” per network line
+#               (skip 110 kV)
+# ------------------------------------------------------------------
+from shapely.ops import linemerge
+from shapely.geometry import LineString, MultiLineString
+
+def build_network_chords(gdf_network: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """Return a GeoDataFrame with 1 straight line per *non-110 kV* network line.
+
+    The chord connects the very first and very last vertex of the whole route.
+    Works for LineString and MultiLineString, Shapely 1.x / 2.x.
+    """
+    def first_last_coord(geom):
+        if geom is None or geom.is_empty:
+            return None
+        if isinstance(geom, LineString):
+            merged = geom
+        else:                                    # MultiLineString
+            merged = linemerge(geom)
+            if isinstance(merged, MultiLineString):
+                merged = max(merged.geoms, key=lambda ls: ls.length)
+        c = list(merged.coords)
+        return (c[0], c[-1]) if len(c) >= 2 and c[0] != c[-1] else None
+
+    rows = []
+    for _, row in gdf_network.iterrows():
+        if int(row.get("v_nom", 0)) == 110:
+            continue               # → skip 110 kV lines
+        ends = first_last_coord(row.geometry)
+        if not ends:
+            continue
+        rows.append({
+            "id"      : f"chord_{row.id}",
+            "geometry": LineString(ends),
+        })
+    return gpd.GeoDataFrame(rows, crs=gdf_network.crs)
 
 
 
@@ -77,6 +116,7 @@ def add_connection_notification_to_html(html_file):
         logger.error(f"Error adding connection notification to HTML: {e}")
         return False
 
+
 def _coords_from_linestring(linestring):
     # Leaflet order is [lat, lon] == [y, x]
     return [[y, x] for x, y in linestring.coords]
@@ -96,14 +136,14 @@ def _best_match_table(*match_dfs):
     return table
 
 
-
 def create_comprehensive_map(dlr_lines, network_lines, matches_dlr, pypsa_lines=None, pypsa_lines_new=None,
                              matches_pypsa=None, matches_pypsa_new=None, fifty_hertz_lines=None, tennet_lines=None,
                              matches_fifty_hertz=None, matches_tennet=None, germany_gdf=None,
                              output_file='comprehensive_grid_map.html', matched_ids=None,
                              dlr_lines_germany_count=None, network_lines_germany_count=None,
                              pypsa_lines_germany_count=None, pypsa_lines_new_germany_count=None,
-                             fifty_hertz_lines_germany_count=None, tennet_lines_germany_count=None, network_lines_chord=None,
+                             fifty_hertz_lines_germany_count=None, tennet_lines_germany_count=None,
+                             network_lines_chord=None,
                              detect_connections=False):
     """
     Create a completely standalone map with no reliance on folium.
@@ -201,7 +241,7 @@ def create_comprehensive_map(dlr_lines, network_lines, matches_dlr, pypsa_lines=
     # ------------------------------------------------------------------
     # 1. Build {dlr_id: [network_id,…]}, {network_id: [dlr_id,…]}, …
     # ------------------------------------------------------------------
-    dlr_matches, network_matches  = {}, {}
+    dlr_matches, network_matches = {}, {}
     pypsa_matches, fifty_matches, tennet_matches = {}, {}, {}
 
     def _add_pair(a_dict, a_id, b_id):
@@ -219,10 +259,10 @@ def create_comprehensive_map(dlr_lines, network_lines, matches_dlr, pypsa_lines=
             _add_pair(a_dict, a_id, b_id)
             _add_pair(b_dict, b_id, a_id)
 
-    _collect_matches(matches_dlr,        dlr_matches,   network_matches)
-    _collect_matches(matches_pypsa,      pypsa_matches, network_matches)
-    _collect_matches(matches_fifty_hertz,fifty_matches, network_matches)
-    _collect_matches(matches_tennet,     tennet_matches,network_matches)
+    _collect_matches(matches_dlr, dlr_matches, network_matches)
+    _collect_matches(matches_pypsa, pypsa_matches, network_matches)
+    _collect_matches(matches_fifty_hertz, fifty_matches, network_matches)
+    _collect_matches(matches_tennet, tennet_matches, network_matches)
 
     def _best_of(dct):
         """return {key: first_item_of_value_list}"""
@@ -231,7 +271,6 @@ def create_comprehensive_map(dlr_lines, network_lines, matches_dlr, pypsa_lines=
     dlr_best = _best_of(dlr_matches)  # DLR  → best Network
     pypsa_best = _best_of(pypsa_matches)  # PyPSA→ best Network
     net_best = _best_of(network_matches)  # Network→ best DLR / PyPSA
-
 
     # Calculate match statistics
     dlr_matched_count = len(matched_dlr_ids)
@@ -343,21 +382,13 @@ def create_comprehensive_map(dlr_lines, network_lines, matches_dlr, pypsa_lines=
         })
 
     # ---------------------------------------------------
-    # Network “chord” lines (straight connections)
+    # Network “chord” lines  (build & serialise)
     # ---------------------------------------------------
-    network_chord_lines_data = []
-    if network_lines_chord is not None and not network_lines_chord.empty:
-        for idx, row in network_lines_chord.iterrows():
-            g = row.geometry
-            if g is None or g.is_empty:
-                continue
-            coords = [_coords_from_linestring(seg) for seg in g.geoms] \
-                if g.geom_type == "MultiLineString" else _coords_from_linestring(g)
-            if coords:
-                network_chord_lines_data.append({
-                    "id": str(row.get("id", idx)),
-                    "coords": coords
-                })
+    network_lines_chord = build_network_chords(network_lines)
+    network_chord_lines_data = [
+        {"id": str(r.id), "coords": [_coords_from_linestring(r.geometry)]}
+        for _, r in network_lines_chord.iterrows()
+    ]
 
     # -------------------------------------------------------------------
     # 3️⃣  PyPSA-EUR lines
@@ -392,12 +423,10 @@ def create_comprehensive_map(dlr_lines, network_lines, matches_dlr, pypsa_lines=
     # -------------------------------------------------------------------
     fifty_hertz_lines_data = []
 
-
     # -------------------------------------------------------------------
     # 5️⃣  TenneT lines
     # -------------------------------------------------------------------
     tennet_lines_data = []
-
 
     # Create JSON data for JavaScript
     map_data = {
@@ -826,8 +855,8 @@ mapData.network_chord_lines.forEach(line => {{
     lineCollections['network_chord'].push(chord);
 }});
 
-        
-          
+
+
 
         // Add PyPSA lines
         mapData.pypsa_lines.forEach(line => {{
