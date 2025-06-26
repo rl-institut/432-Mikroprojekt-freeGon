@@ -3,6 +3,7 @@ import os
 import argparse
 import logging
 
+
 # scripts/run_matching.py
 import yaml
 import sys
@@ -21,11 +22,58 @@ from src.matching.pypsa_matching import match_pypsa_eur_lines
 from src.matching.tso_matching import match_fifty_hertz_lines, match_tennet_lines
 from src.data.exporters import export_results
 from src.visualization.charts import generate_parameter_comparison_charts
-from src.visualization.maps import create_comprehensive_map
+from src.visualization.maps import create_comprehensive_map, build_network_chords
 from src.data.processors import filter_lines_by_voltage
-from src.matching.hybrid_matching import match_lines_hybrid
+from src.matching.hybrid_matching import match_lines_real_and_chord
+from src.matching.transformer_matching import match_transformers
+from src.data.transformers import (
+    load_dlr_transformers,
+    load_network_transformers,
+    clip_to_germany as clip_trf_to_germany,
+)
+
+
+
 
 logger = logging.getLogger(__name__)
+
+# ──────────────────────────────────────────────────────────────
+#  Transformer helpers – 100 % self-contained
+# ──────────────────────────────────────────────────────────────
+from pathlib import Path
+import logging
+import pandas as pd
+import geopandas as gpd
+from shapely import wkt, wkb
+
+log = logging.getLogger(__name__)
+
+
+def _to_shape(txt: str):
+    """
+    Convert one string to a Shapely geometry.
+
+    • Accepts either WKT (e.g. 'POINT (13 52)')
+      or WKB **hex** (e.g. '0101000020E610...').
+
+    • Returns None on any parsing error → caller will drop invalid rows.
+    """
+    if not isinstance(txt, str) or not txt.strip():
+        return None
+
+    # try WKT first (fast for POINT / LINESTRING / …)
+    try:
+        return wkt.loads(txt)
+    except Exception:
+        pass
+
+    # fall back to WKB-hex
+    try:
+        return wkb.loads(bytes.fromhex(txt))
+    except Exception:
+        return None
+
+
 
 
 def prepare_tennet_data(input_file, output_file='tennet_fixed.csv'):
@@ -176,7 +224,7 @@ def load_config(config_path):
                 "dlr": {
                     "buffer_distance": 0.020,
                     "snap_distance": 0.009,
-                    "direction_threshold": 0.65,
+                    "direction_threshold": 0.2,
                     "enforce_voltage_matching": False
                 },
                 "pypsa_eur": {
@@ -228,6 +276,11 @@ def load_config(config_path):
     except Exception as e:
         logger.error(f"Error loading configuration: {e}")
         raise
+
+
+
+
+
 
 
 def setup_logging(config, args):
@@ -352,10 +405,28 @@ def main():
     # Define file paths
     dlr_file = config['paths']['input']['dlr_file']
     network_file = config['paths']['input']['network_file']
+    dlr_trf_file = "data/input/dlr_transformers.csv"
+    net_trf_file = "data/input/network_transformers.csv"
     pypsa_eur_file = config['paths']['input']['pypsa_eur_file']
     fifty_hertz_file = config['paths']['input']['fifty_hertz_file']
     tennet_file = config['paths']['input']['tennet_file']
     boundary_file = config['paths']['input']['boundary_file']
+    # ───────────────── Germany boundary ────────────────────────────────
+    germany_gdf = load_germany_boundary(boundary_file)
+    if germany_gdf is None:
+        logger.error("Could not load Germany boundary. Exiting.")
+        return
+
+    # ───────────────── transformers (need germany_gdf) ─────────────────
+    logger.info("Loading transformer CSV files …")
+    dlr_trf = clip_trf_to_germany(
+        load_dlr_transformers(dlr_trf_file), germany_gdf
+    )
+    net_trf = clip_trf_to_germany(
+        load_network_transformers(net_trf_file), germany_gdf
+    )
+
+    logger.info("DLR-TRF: %d points, NET-TRF: %d points", len(dlr_trf), len(net_trf))
 
     # Define clipped file paths
     clipped_dir = config['paths']['processed']['clipped_dir']
@@ -408,6 +479,30 @@ def main():
     pypsa_eur_lines = None
     fifty_hertz_lines = None
     tennet_lines = None
+
+
+    from shapely import wkt
+
+    def _ensure_geodf(df):
+        """Turn bare DataFrame (+geometry col) into a proper GeoDataFrame."""
+        if isinstance(df, gpd.GeoDataFrame):
+            return df
+        if "geometry" not in df.columns:
+            return df  # nothing we can do
+        # dtype will often still be "object" – convert strings → Shapely
+        if df["geometry"].dtype == "object" and isinstance(df["geometry"].iloc[0], str):
+            df = df.copy()
+            df["geometry"] = df["geometry"].apply(wkt.loads)
+        return gpd.GeoDataFrame(df, geometry="geometry", crs="EPSG:4326")
+
+    # make sure both are GeoDataFrames
+    dlr_lines = _ensure_geodf(dlr_lines)
+    network_lines = _ensure_geodf(network_lines)
+
+    for g in (dlr_lines, network_lines):
+        if g.geometry.dtype == "object":
+            g["geometry"] = gpd.GeoSeries.from_wkt(g.geometry)
+            g.set_geometry("geometry", inplace=True)
 
     if os.path.exists(pypsa_eur_file_to_use):
         pypsa_eur_lines = load_pypsa_eur_data(pypsa_eur_file_to_use)
@@ -497,38 +592,82 @@ def main():
     # Match DLR lines
     logger.info("Matching DLR lines...")
     dlr_cfg = config['matching']['dlr']
-    final_matches_dlr, best_map, net_chord = match_lines_hybrid(
-        dlr_lines,
-        network_lines,
-        cfg=dlr_cfg
+
+    # Generate chord lines
+    net_chord = build_network_chords(network_lines)
+
+    # Add necessary columns to chord lines
+    net_chord["v_nom"] = network_lines["v_nom"].mean()
+    net_chord["r"] = net_chord["x"] = net_chord["b"] = 0  # dummy impedances
+    net_chord["s_nom"] = 0
+
+    # Combine with network lines for matching
+    combined_network = pd.concat([network_lines, net_chord], ignore_index=True)            # chords only
+    logger.info(
+        f"Combined network has {len(combined_network)} lines ({len(network_lines)} original + {len(net_chord)} chords)")
+
+    # 1) raw tables -------------------------------------------------------
+    df_real, df_chord, best_real, best_chord = match_lines_real_and_chord(
+        dlr_lines, network_lines, cfg=dlr_cfg)
+
+    # 2) one-to-one view --------------------------------------------------
+    df_real = (df_real.sort_values("score", ascending=False)
+               .drop_duplicates("dlr_id", keep="first"))
+    df_chord = (df_chord.sort_values("score", ascending=False)
+                .drop_duplicates("dlr_id", keep="first"))
+
+    # →  new line: discard chord rows that clash with a real partner
+    df_chord = df_chord[~df_chord.dlr_id.isin(df_real.dlr_id)]
+
+    # 3) helper sets & export --------------------------------------------
+    # ── 3) helper sets & export  ----------------------------------
+    all_matched_dlr_ids.update(df_real.dlr_id.astype(str))
+    all_matched_dlr_ids.update(df_chord.dlr_id.astype(str))
+
+    all_matched_network_ids.update(
+        nid for nid in df_real.network_id.astype(str)
+        if not nid.startswith("chord_")
     )
 
-    # Process DLR matches
-    export_file = os.path.join(
-        config['paths']['output']['matches_dir'],
-        'matched_dlr_lines.csv'
-    )
-    export_results(final_matches_dlr,
-                   output_file=os.path.join(config['paths']['output']['matches_dir'],
-                                            'matched_dlr_lines.csv'))
+    matched_chord_ids = set(df_chord.network_id.astype(str))
 
-    if final_matches_dlr.empty:
-        logger.warning("DLR matcher returned 0 rows – wrote empty CSV")
-    else:
-        # update ID sets
-        all_matched_dlr_ids = set(final_matches_dlr['dlr_id'].astype(str))
-        all_matched_network_ids.update(
-            set(final_matches_dlr['network_id'].astype(str))
-        )
 
-        # charts
-        if not args.skip_visualizations:
-            generate_parameter_comparison_charts(
-                final_matches_dlr,
-                dataset_name='DLR',
-                output_dir=os.path.join(
-                    config['paths']['output']['charts_dir'], 'dlr')
-            )
+    # ➜ add this one line -----------------------------------------
+    matches_dir = Path(config["paths"]["output"]["matches_dir"])
+
+    # ─── 4) TRANSFORMER matcher ───────────────────────────────
+    logger.info("Matching transformers (≤ 10 m)…")
+    df_trf_match, matched_dlr_trf, matched_net_trf = match_transformers(
+        dlr_trf, net_trf, buffer_m=10.0)
+
+    matches_dir = Path(config["paths"]["output"]["matches_dir"])
+    export_results(df_trf_match, matches_dir / "matched_transformers.csv")
+
+    matched_dlr_trf = {str(i) for i in matched_dlr_trf}
+    matched_net_trf = {str(i) for i in matched_net_trf}
+
+    logger.info("Network-TRF exported to map: %d  (matched %d)",
+                len(net_trf), len(matched_net_trf))
+    logger.info("DLR-TRF exported to map:     %d  (matched %d)",
+                len(dlr_trf), len(matched_dlr_trf))
+
+    all_matched_dlr_ids.update(matched_dlr_trf)
+    all_matched_network_ids.update(matched_net_trf)
+
+    # and replace the two ellipsis lines by these -----------------
+    export_results(df_real, output_file=matches_dir / "matched_dlr_real.csv")
+    export_results(df_chord, output_file=matches_dir / "matched_dlr_chord.csv")
+
+    dlr_match_rate = 100 * len(all_matched_dlr_ids) / len(dlr_lines) \
+        if len(dlr_lines) else 0
+
+    network_coverage_rate = 100 * len(all_matched_network_ids) / len(network_lines) \
+        if len(network_lines) else 0
+
+    logger.info(f"DLR Lines   : {len(dlr_lines)}  (matched {len(all_matched_dlr_ids)}, "
+                f"{dlr_match_rate:5.2f} %)")
+    logger.info(f"Network real: {len(network_lines)}  (covered {len(all_matched_network_ids)}, "
+                f"{network_coverage_rate:5.2f} %)")
 
     # Match PyPSA-EUR lines if available
     final_matches_pypsa_eur = None
@@ -633,12 +772,18 @@ def main():
             dlr_lines=dlr_lines,
             network_lines=network_lines,
             network_lines_chord= net_chord,
-            matches_dlr=final_matches_dlr if not (final_matches_dlr is None or final_matches_dlr.empty) else None,
+            network_chord_matched=matched_chord_ids,
+            matches_dlr_real=df_real,
+            matches_dlr_chord=df_chord,
             pypsa_lines=pypsa_eur_lines if pypsa_eur_lines_germany_count > 0 else None,
             matches_pypsa=final_matches_pypsa_eur if not (
                     final_matches_pypsa_eur is None or final_matches_pypsa_eur.empty) else None,
             fifty_hertz_lines=fifty_hertz_lines if fifty_hertz_lines_germany_count > 0 else None,
             tennet_lines=tennet_lines if tennet_lines_germany_count > 0 else None,
+            network_trf=net_trf,
+            dlr_trf=dlr_trf,
+            matched_net_trf_ids=matched_net_trf,
+            matched_dlr_trf_ids=matched_dlr_trf,
             matches_fifty_hertz=final_matches_fifty_hertz if not (
                     final_matches_fifty_hertz is None or final_matches_fifty_hertz.empty) else None,
             matches_tennet=final_matches_tennet if not (

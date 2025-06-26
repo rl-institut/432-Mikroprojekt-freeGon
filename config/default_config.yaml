@@ -7,6 +7,8 @@ paths:
   input:
     dlr_file: "data/input/dlr-lines.csv"
     network_file: "data/input/network-lines.csv"
+    network_transformer_file: "data/input/network_transformers.csv"
+    dlr_transformer_file: "data/input/dlr_transformers.csv"
     pypsa_eur_file: "data/input/pypsa-eur-lines.csv"
     fifty_hertz_file: "data/input/50hertz-lines.csv"
     tennet_file: "data/input/tennet-lines.csv"
@@ -25,8 +27,8 @@ matching:
   dlr:
     buffer_distance: 0.05
     snap_distance: 0.010
-    direction_threshold: 0.0
-    enforce_voltage_matching: true
+    direction_threshold: 0.2
+    enforce_voltage_matching: false
     use_endpoint_filter: false
 
   pypsa_eur:

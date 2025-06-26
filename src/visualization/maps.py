@@ -136,14 +136,15 @@ def _best_match_table(*match_dfs):
     return table
 
 
-def create_comprehensive_map(dlr_lines, network_lines, matches_dlr, pypsa_lines=None, pypsa_lines_new=None,
-                             matches_pypsa=None, matches_pypsa_new=None, fifty_hertz_lines=None, tennet_lines=None,
+def create_comprehensive_map(dlr_lines, network_lines, matches_dlr_real=None,  matches_dlr_chord=None, pypsa_lines=None, pypsa_lines_new=None,
+                             matches_pypsa=None, matches_pypsa_new=None, fifty_hertz_lines=None, tennet_lines=None, network_trf=None, dlr_trf=None,
+                             trf_matches=None, matched_net_trf_ids=None, matched_dlr_trf_ids=None,
                              matches_fifty_hertz=None, matches_tennet=None, germany_gdf=None,
                              output_file='comprehensive_grid_map.html', matched_ids=None,
                              dlr_lines_germany_count=None, network_lines_germany_count=None,
                              pypsa_lines_germany_count=None, pypsa_lines_new_germany_count=None,
                              fifty_hertz_lines_germany_count=None, tennet_lines_germany_count=None,
-                             network_lines_chord=None,
+                             network_lines_chord=None, network_chord_matched=None,
                              detect_connections=False):
     """
     Create a completely standalone map with no reliance on folium.
@@ -157,6 +158,14 @@ def create_comprehensive_map(dlr_lines, network_lines, matches_dlr, pypsa_lines=
 
     logger = logging.getLogger(__name__)
     logger.info("Creating standalone map with direct JavaScript...")
+
+    matches = []
+    for _df in (matches_dlr_real, matches_dlr_chord):
+        if _df is not None and not _df.empty:
+            matches.append(_df)
+
+    matches_dlr = (pd.concat(matches, ignore_index=True)  # final table
+                   if matches else pd.DataFrame(columns=["dlr_id", "network_id"]))
 
     # Format match rate
     def format_rate(numerator, denominator):
@@ -241,36 +250,30 @@ def create_comprehensive_map(dlr_lines, network_lines, matches_dlr, pypsa_lines=
     # ------------------------------------------------------------------
     # 1. Build {dlr_id: [network_id,…]}, {network_id: [dlr_id,…]}, …
     # ------------------------------------------------------------------
+    # after you have built df_real / df_chord  ⟶  “matches_dlr”
     dlr_matches, network_matches = {}, {}
-    pypsa_matches, fifty_matches, tennet_matches = {}, {}, {}
 
-    def _add_pair(a_dict, a_id, b_id):
-        if a_id not in a_dict:
-            a_dict[a_id] = []
-        if b_id not in a_dict[a_id]:
-            a_dict[a_id].append(b_id)
+    def _add_pair(d, a, b):
+        d.setdefault(a, []).append(b)
 
-    def _collect_matches(df, a_dict, b_dict):
+    def _collect(df, a_dict, b_dict):
         if df is None or df.empty:
             return
         for _, r in df.iterrows():
-            a_id = str(r["dlr_id"])
-            b_id = str(r["network_id"])
-            _add_pair(a_dict, a_id, b_id)
-            _add_pair(b_dict, b_id, a_id)
+            a = str(r["dlr_id"]);
+            b = str(r["network_id"])
+            _add_pair(a_dict, a, b)
+            _add_pair(b_dict, b, a)
 
-    _collect_matches(matches_dlr, dlr_matches, network_matches)
-    _collect_matches(matches_pypsa, pypsa_matches, network_matches)
-    _collect_matches(matches_fifty_hertz, fifty_matches, network_matches)
-    _collect_matches(matches_tennet, tennet_matches, network_matches)
+    # **DLR-only**                                              ↓↓↓
+    _collect(matches_dlr_real, dlr_matches, network_matches)
+    _collect(matches_dlr_chord, dlr_matches, network_matches)
 
-    def _best_of(dct):
-        """return {key: first_item_of_value_list}"""
-        return {k: v[0] for k, v in dct.items() if v}
+    def _best_of(d):  # unchanged utility
+        return {k: v[0] for k, v in d.items() if v}
 
-    dlr_best = _best_of(dlr_matches)  # DLR  → best Network
-    pypsa_best = _best_of(pypsa_matches)  # PyPSA→ best Network
-    net_best = _best_of(network_matches)  # Network→ best DLR / PyPSA
+    dlr_best = _best_of(dlr_matches)  # DLR  → best network
+    net_best = _best_of(network_matches)  # Network → best DLR  (now DLR-only!)
 
     # Calculate match statistics
     dlr_matched_count = len(matched_dlr_ids)
@@ -382,13 +385,38 @@ def create_comprehensive_map(dlr_lines, network_lines, matches_dlr, pypsa_lines=
         })
 
     # ---------------------------------------------------
-    # Network “chord” lines  (build & serialise)
+    # Network "chord" lines  (build & serialise)
     # ---------------------------------------------------
-    network_lines_chord = build_network_chords(network_lines)
-    network_chord_lines_data = [
-        {"id": str(r.id), "coords": [_coords_from_linestring(r.geometry)]}
-        for _, r in network_lines_chord.iterrows()
-    ]
+    network_chord_lines_data = []
+
+    # If network_lines_chord is already provided, use it directly
+    if network_lines_chord is None:
+        network_lines_chord = build_network_chords(network_lines)
+
+    logger.info(f"Processing {len(network_lines_chord)} chord lines")
+
+    # Use network_chord_matched parameter, fall back to empty set if not provided
+    matched_chord_ids = set() if network_chord_matched is None else network_chord_matched
+
+    logger.info(f"Using {len(matched_chord_ids)} matched chord IDs")
+    if matched_chord_ids and len(matched_chord_ids) > 0:
+        logger.info(f"Sample matched chord IDs: {list(matched_chord_ids)[:5]}")
+
+    # Build chord lines data with matched status
+    matched_count = 0
+    for _, r in network_lines_chord.iterrows():
+        chord_id = str(r.id)
+        is_matched = chord_id in matched_chord_ids
+        if is_matched:
+            matched_count += 1
+
+        network_chord_lines_data.append({
+            "id": chord_id,
+            "is_matched": is_matched,
+            "coords": [_coords_from_linestring(r.geometry)]
+        })
+
+    logger.info(f"Created {len(network_chord_lines_data)} chord line data objects ({matched_count} matched)")
 
     # -------------------------------------------------------------------
     # 3️⃣  PyPSA-EUR lines
@@ -407,7 +435,7 @@ def create_comprehensive_map(dlr_lines, network_lines, matches_dlr, pypsa_lines=
             line_id = str(row.get("id", idx))
             pypsa_lines_data.append({
                 "id": line_id,
-                "best": pypsa_best.get(line_id, ""),
+                #"best": pypsa_best.get(line_id, ""),
                 "is_matched": line_id in matched_pypsa_eur_ids,
                 "v_nom": str(row.get("v_nom", row.get("voltage", "N/A"))),
                 "s_nom": str(row.get("s_nom", "N/A")),
@@ -427,6 +455,34 @@ def create_comprehensive_map(dlr_lines, network_lines, matches_dlr, pypsa_lines=
     # 5️⃣  TenneT lines
     # -------------------------------------------------------------------
     tennet_lines_data = []
+    # ------------------------------------------------------------------
+    # Transformer point collections
+    # ------------------------------------------------------------------
+    net_trf_data, dlr_trf_data = [], []
+
+    def _push_point(row, is_matched, target):
+        """
+        Append one transformer marker *only* if the geometry is a POINT.
+        Silently ignore LineStrings (should not happen after the new loader).
+        """
+        g = row.geometry
+        if g is None or g.is_empty or g.geom_type != "Point":
+            return
+        target.append(dict(
+            id=str(row["id"]),
+            lon=g.x, lat=g.y,
+            is_matched=is_matched,
+        ))
+
+    if network_trf is not None and not network_trf.empty:
+        for _, r in network_trf.iterrows():
+            _push_point(r, str(r["id"]) in (matched_net_trf_ids or set()),
+                        net_trf_data)
+
+    if dlr_trf is not None and not dlr_trf.empty:
+        for _, r in dlr_trf.iterrows():
+            _push_point(r, str(r["id"]) in (matched_dlr_trf_ids or set()),
+                        dlr_trf_data)
 
     # Create JSON data for JavaScript
     map_data = {
@@ -436,7 +492,9 @@ def create_comprehensive_map(dlr_lines, network_lines, matches_dlr, pypsa_lines=
         'network_chord_lines': network_chord_lines_data,
         'pypsa_lines': pypsa_lines_data,
         'fifty_hertz_lines': fifty_hertz_lines_data,
-        'tennet_lines': tennet_lines_data
+        'tennet_lines': tennet_lines_data,
+        "network_trf": net_trf_data,
+        "dlr_trf": dlr_trf_data
     }
 
     map_data_json = json.dumps(map_data, separators=(',', ':'))
@@ -616,8 +674,15 @@ def create_comprehensive_map(dlr_lines, network_lines, matches_dlr, pypsa_lines=
             <label for="filter-network-matched">Matched</label><br>
             <input type="checkbox" id="filter-network-unmatched" checked>
             <label for="filter-network-unmatched">Unmatched</label>
-            <input type="checkbox" id="filter-network-chord"     checked>   <!-- NEW -->
-            <label for="filter-network-chord">Chord&nbsp;(straight)</label>
+            
+            <h5>Chord Lines</h5>
+            <input type="checkbox" id="filter-network-chord" checked>
+            <label for="filter-network-chord">All Chords</label><br>
+            <input type="checkbox" id="filter-network-chord-matched" checked>
+            <label for="filter-network-chord-matched">Matched</label><br>
+            <input type="checkbox" id="filter-network-chord-unmatched" checked>
+            <label for="filter-network-chord-unmatched">Unmatched</label>
+
 
             <h5>PyPSA Lines</h5>
             <input type="checkbox" id="filter-pypsa-matched" checked>
@@ -636,6 +701,13 @@ def create_comprehensive_map(dlr_lines, network_lines, matches_dlr, pypsa_lines=
             <label for="filter-tennet-matched">Matched</label><br>
             <input type="checkbox" id="filter-tennet-unmatched" checked>
             <label for="filter-tennet-unmatched">Unmatched</label>
+            
+            <label><input type="checkbox" id="filter-net-trf-matched"   checked>Net-TRF matched</label><br>
+            <label><input type="checkbox" id="filter-net-trf-unmatched" checked>Net-TRF unmatched</label><br>
+            <label><input type="checkbox" id="filter-dlr-trf-matched"   checked>DLR-TRF matched</label><br>
+            <label><input type="checkbox" id="filter-dlr-trf-unmatched" checked>DLR-TRF unmatched</label><br>
+
+            
         </div>
         <div style="margin-top: 10px; display: flex; justify-content: space-between;">
             <button id="apply-filter" style="flex: 1; margin-right: 5px; padding: 5px; background: #4CAF50; color: white; border: none; border-radius: 3px; cursor: pointer;">Apply</button>
@@ -685,6 +757,15 @@ def create_comprehensive_map(dlr_lines, network_lines, matches_dlr, pypsa_lines=
             <div class="legend-color" style="background-color: darkblue;"></div>
             <span>TenneT Lines (Matched)</span>
         </div>
+        
+        <div class="legend-item">
+             <div class="legend-color" style="background-color: cyan;"></div>
+            <span>Chord Lines (Matched)</span>
+        </div>
+        <div class="legend-item">
+        <div class="legend-color" style="background-color: black; border-top: 1px dotted #000;"></div>
+        <span>Chord Lines (Unmatched)</span>
+        </div>            
     </div>
 
     <div class="connection-notification">
@@ -837,23 +918,55 @@ mapData.network_lines.forEach(line => {{
 
 
 /* ─────────────────────────────────────────────────────────────
-   Network straight-line “chords”
+   Network straight-line "chords"
    ───────────────────────────────────────────────────────────── */
 
+console.log('Adding chord lines, count:', mapData.network_chord_lines.length);
+
+// Create two separate collections for matched and unmatched chords
 const chordLayerGroup = L.layerGroup().addTo(map);   // toggled as ONE layer
-lineCollections['network_chord'] = [];               // filter pane entry
+lineCollections['network_chord_matched'] = [];      // Matched chords
+lineCollections['network_chord_unmatched'] = [];    // Unmatched chords
 
 mapData.network_chord_lines.forEach(line => {{
+    // Check if this chord is matched by examining the ID
+    const is_matched = line.is_matched === true; 
+    
+    // Style based on matched status
+    const color = is_matched ? 'cyan' : '#000';    // cyan=matched, black=unmatched
+    const weight = is_matched ? 4 : 2;             // matched are thicker
+    const opacity = 0.9;
+    const dashArray = is_matched ? null : '3,3';   // unmatched are dotted
+    
+    // Create the chord line
     const chord = L.polyline(line.coords, {{
-        color  : '#000',    // solid black
-        weight : 2,
-        opacity: 0.9,
-        dashArray : '3,3'       // dotted so it stands out
+        color: color,
+        weight: weight,
+        opacity: opacity,
+        dashArray: dashArray,
+        pane: 'chordPane'
     }}).addTo(chordLayerGroup);
-
-    chord.bindTooltip(`Chord ${{line.id}}`);
-    lineCollections['network_chord'].push(chord);
+    
+    // Add tooltip and popup
+    chord.bindTooltip(`Chord ${{line.id}} (${{is_matched ? 'matched' : 'unmatched'}})`);
+    chord.bindPopup(`
+        <div style="min-width:200px;">
+            <h4>Chord Line: ${{line.id}}</h4>
+            <p><b>Status:</b> ${{is_matched ? 'Matched' : 'Unmatched'}}</p>
+            <p><b>Type:</b> Straight-line representation</p>
+        </div>
+    `);
+    
+    // Add to appropriate collection for filtering
+    if (is_matched) {{
+        lineCollections['network_chord_matched'].push(chord);
+    }} else {{
+        lineCollections['network_chord_unmatched'].push(chord);
+    }}
 }});
+
+console.log('Added chord lines - Matched:', lineCollections['network_chord_matched'].length, 
+           'Unmatched:', lineCollections['network_chord_unmatched'].length);
 
 
 
@@ -966,57 +1079,108 @@ mapData.network_chord_lines.forEach(line => {{
             }});
         }});
 
-        // Add TenneT lines
-        mapData.tennet_lines.forEach(line => {{
-            const color = line.is_matched ? 'darkblue' : 'blue';
-            const weight = line.is_matched ? 3 : 2;
-            const opacity = line.is_matched ? 0.8 : 0.6;
-            const category = 'tennet_' + (line.is_matched ? 'matched' : 'unmatched');
+/* ---------- TenneT lines --------------------------------------- */
+mapData.tennet_lines.forEach(line => {{
+    const colour   = line.is_matched ? 'darkblue' : 'blue';
+    const weight   = line.is_matched ? 3 : 2;
+    const opacity  = line.is_matched ? 0.8 : 0.6;
+    const category = 'tennet_' + (line.is_matched ? 'matched' : 'unmatched');
 
-            const polyline = L.polyline(line.coords, {{
-                color: color,
-                weight: weight,
-                opacity: opacity
-            }}).addTo(map);
+    const polyline = L.polyline(line.coords, {{
+        color  : colour,
+        weight : weight,
+        opacity: opacity
+    }}).addTo(map);
 
-            const tooltip = `TenneT Line ${{line.id}} ${{line.is_matched ? '(matched)' : '(unmatched)'}} - ${{line.v_nom}} kV`;
-            polyline.bindTooltip(tooltip);
+    /* tooltip */
+    polyline.bindTooltip(
+        `TenneT Line ${{line.id}} ` +
+        `${{line.is_matched ? '(matched)' : '(unmatched)'}} – ` +
+        `${{line.v_nom}} kV`
+    );
 
-            const popupContent = `
-    <div style="min-width:220px;">
-        <h4>Tennet Line ${{line.id}}</h4>
+    /* popup */
+    const popupContent = `
+        <div style="min-width:220px;">
+            <h4>TenneT Line ${{line.id}}</h4>
+            <p><b>Status:</b> ${{line.is_matched ? 'Matched' : 'Unmatched'}}</p>
+            <p><b>Voltage:</b> ${{line.v_nom}} kV</p>
+            <p><b>s<sub>nom</sub>:</b> ${{line.s_nom}} MW</p>
+            <p><b>r / x / b&nbsp;per km:</b><br>
+               ${{line.r}} Ω&nbsp;/&nbsp;${{line.x}} Ω&nbsp;/&nbsp;${{line.b}} S
+            </p>
+            ${{(line.matches && line.matches.length)
+                ? `<p><b>Match&nbsp;ID:</b> ${{line.matches[0]}}</p>`
+                : ''}}
+        </div>`;
+    polyline.bindPopup(popupContent);
 
-        <p><b>Status:</b> ${{line.is_matched ? 'Matched' : 'Unmatched'}}</p>
-        <p><b>Voltage:</b> ${{line.v_nom}} kV</p>
-        <p><b>s<sub>nom</sub>:</b> ${{line.s_nom}} MW</p>
+    /* bookkeeping */
+    lineCollections[category].push(polyline);
 
-        <p><b>r / x / b&nbsp;per km:</b><br>
-           ${{line.r}} Ω&nbsp;/&nbsp;${{line.x}} Ω&nbsp;/&nbsp;${{line.b}} S
-        </p>
+    const uid = `tennet_${{line.id}}`;
+    linesById[uid] = {{
+        line      : polyline,
+        id        : line.id,
+        type      : 'tennet',
+        is_matched: line.is_matched,
+        coords    : line.coords
+    }};
 
-        ${{(line.matches && line.matches.length)
-            ? `<p><b>Match&nbsp;ID:</b> ${{line.matches[0]}}</p>`
-            : ''}}
-    </div>`;
+    polyline.on('click', () => highlightLine(uid));
+}});
 
-            // Store line for filtering
-            lineCollections[category].push(polyline);
 
-            // Store line by ID for search
-            const uniqueId = `tennet_${{line.id}}`;
-            linesById[uniqueId] = {{
-                line: polyline,
-                id: line.id,
-                type: 'tennet',
-                is_matched: line.is_matched,
-                coords: line.coords
-            }};
+/* ===================== TRANSFORMER MARKERS ===================== *
+ *  ▼ four point layers (network / DLR  ×  matched / unmatched)    *
+ *  ▼ colours:                                                     *
+ *       network :  matched #ff7800   unmatched #a0a0a0            *
+ *       DLR     :  matched #00c0ff   unmatched #004466            *
+ *  ▼ all markers stored in lineCollections → generic filters      *
+ * =============================================================== */
 
-            // Add click handler
-            polyline.on('click', function() {{
-                highlightLine(uniqueId);
-            }});
-        }});
+function trfStyle(col) {{
+    return {{ radius: 5, weight: 1, color: col, fillColor: col, fillOpacity: 0.9 }};
+}}
+
+const trfCollections = {{
+    net_trf_matched   : [],
+    net_trf_unmatched : [],
+    dlr_trf_matched   : [],
+    dlr_trf_unmatched : []
+}};
+
+/* -------- network transformers -------- */
+mapData.network_trf.forEach(p => {{
+    const col   = p.is_matched ? '#ff7800' : '#a0a0a0';
+    const mark  = L.circleMarker([p.lat, p.lon], trfStyle(col))
+                     .bindTooltip(`Network TRF ${{p.id}} ` +
+                                  `${{p.is_matched ? '(matched)' : '(unmatched)'}}`)
+                     .addTo(map);
+
+    (p.is_matched ? trfCollections.net_trf_matched
+                  : trfCollections.net_trf_unmatched).push(mark);
+}});
+
+/* -------- DLR transformers ------------ */
+mapData.dlr_trf.forEach(p => {{
+    const col   = p.is_matched ? '#00c0ff' : '#004466';
+    const mark  = L.circleMarker([p.lat, p.lon], trfStyle(col))
+                     .bindTooltip(`DLR TRF ${{p.id}} ` +
+                                  `${{p.is_matched ? '(matched)' : '(unmatched)'}}`)
+                     .addTo(map);
+
+    (p.is_matched ? trfCollections.dlr_trf_matched
+                  : trfCollections.dlr_trf_unmatched).push(mark);
+}});
+
+/* ---- expose to global collections for filtering ---- */
+lineCollections['net_trf_matched']    = trfCollections.net_trf_matched;
+lineCollections['net_trf_unmatched']  = trfCollections.net_trf_unmatched;
+lineCollections['dlr_trf_matched']    = trfCollections.dlr_trf_matched;
+lineCollections['dlr_trf_unmatched']  = trfCollections.dlr_trf_unmatched;
+
+        
 
         // Add special connection marker
         const connectionPoint = [53.343675, 7.972087];
@@ -1076,6 +1240,8 @@ mapData.network_chord_lines.forEach(line => {{
             // Open popup
             lineData.line.openPopup();
         }}
+        
+        
 
         // Search functionality
         document.getElementById('search-button').addEventListener('click', function() {{
@@ -1147,41 +1313,81 @@ mapData.network_chord_lines.forEach(line => {{
             }}
         }});
 
-        /* ─── Filter functionality ─────────────────────────────── */
+/* ─── Filter functionality ─────────────────────────────── */
 document.getElementById('apply-filter').addEventListener('click', () => {{
     /* ① collect checkbox states */
     const filters = {{
-        dlr_matched          : document.getElementById('filter-dlr-matched').checked,
-        dlr_unmatched        : document.getElementById('filter-dlr-unmatched').checked,
-        network_matched      : document.getElementById('filter-network-matched').checked,
-        network_unmatched    : document.getElementById('filter-network-unmatched').checked,
-        pypsa_matched        : document.getElementById('filter-pypsa-matched').checked,
-        pypsa_unmatched      : document.getElementById('filter-pypsa-unmatched').checked,
-        fifty_hertz_matched  : document.getElementById('filter-fifty-hertz-matched').checked,
-        fifty_hertz_unmatched: document.getElementById('filter-fifty-hertz-unmatched').checked,
-        tennet_matched       : document.getElementById('filter-tennet-matched').checked,
-        tennet_unmatched     : document.getElementById('filter-tennet-unmatched').checked,
-        network_chord        : document.getElementById('filter-network-chord').checked   // ★ NEW
-    }};   /* ← single ‘;’, no extra comma */
+        dlr_matched            : document.getElementById('filter-dlr-matched').checked,
+        dlr_unmatched          : document.getElementById('filter-dlr-unmatched').checked,
+        network_matched        : document.getElementById('filter-network-matched').checked,
+        network_unmatched      : document.getElementById('filter-network-unmatched').checked,
+        pypsa_matched          : document.getElementById('filter-pypsa-matched').checked,
+        pypsa_unmatched        : document.getElementById('filter-pypsa-unmatched').checked,
+        fifty_hertz_matched    : document.getElementById('filter-fifty-hertz-matched').checked,
+        fifty_hertz_unmatched  : document.getElementById('filter-fifty-hertz-unmatched').checked,
+        tennet_matched         : document.getElementById('filter-tennet-matched').checked,
+        tennet_unmatched       : document.getElementById('filter-tennet-unmatched').checked,
+        network_chord          : document.getElementById('filter-network-chord').checked,
+        network_chord_matched  : document.getElementById('filter-network-chord-matched').checked,
+        network_chord_unmatched: document.getElementById('filter-network-chord-unmatched').checked,
+        net_trf_matched   : document.getElementById('filter-net-trf-matched').checked,
+        net_trf_unmatched : document.getElementById('filter-net-trf-unmatched').checked,
+        dlr_trf_matched   : document.getElementById('filter-dlr-trf-matched').checked,
+        dlr_trf_unmatched : document.getElementById('filter-dlr-trf-unmatched').checked,
 
-    /* ② ordinary layers ---------------------------------- */
+    }};
+    
+    console.log("Applying filters:", filters);
+
+    /* ② regular layers (excluding chord layers) */
     for (const category in filters) {{
-        if (category === 'network_chord') continue;              // chords later
-        const show  = filters[category];
+        // Skip chord categories - we'll handle them separately
+        if (category.includes('network_chord')) continue;
+        
+        const show = filters[category];
         const lines = lineCollections[category] || [];
-        for (const ln of lines) {{
-            if (show) {{ if (!map.hasLayer(ln)) map.addLayer(ln); }}
-            else       {{ if (map.hasLayer(ln)) map.removeLayer(ln); }}
+        
+        for (const line of lines) {{
+            if (show) {{
+                if (!map.hasLayer(line)) map.addLayer(line);
+            }} else {{
+                if (map.hasLayer(line)) map.removeLayer(line);
+            }}
         }}
     }}
 
-    /* ③ chord LayerGroup --------------------------------- */
-    if (filters.network_chord) {{
-        if (!map.hasLayer(chordLayerGroup)) map.addLayer(chordLayerGroup);
+    /* ③ chord handling (special case) */
+    // First determine if any chord types should be shown
+    const showAnyChords = filters.network_chord && 
+                         (filters.network_chord_matched || filters.network_chord_unmatched);
+    
+    if (!showAnyChords) {{
+        // Hide all chords
+        if (map.hasLayer(chordLayerGroup)) map.removeLayer(chordLayerGroup);
     }} else {{
-        if (map.hasLayer(chordLayerGroup))  map.removeLayer(chordLayerGroup);
+        // Show chord layer group
+        if (!map.hasLayer(chordLayerGroup)) map.addLayer(chordLayerGroup);
+        
+        // Now handle individual chord visibility within the group
+        // Matched chords
+        for (const chord of lineCollections.network_chord_matched) {{
+            if (filters.network_chord_matched) {{
+                chord.addTo(chordLayerGroup);
+            }} else {{
+                chordLayerGroup.removeLayer(chord);
+            }}
+        }}
+        
+        // Unmatched chords
+        for (const chord of lineCollections.network_chord_unmatched) {{
+            if (filters.network_chord_unmatched) {{
+                chord.addTo(chordLayerGroup);
+            }} else {{
+                chordLayerGroup.removeLayer(chord);
+            }}
+        }}
     }}
-}});   /* ← exactly two braces then ‘);’ */
+}});
 
 
         // Reset filters
