@@ -607,8 +607,13 @@ def main():
         f"Combined network has {len(combined_network)} lines ({len(network_lines)} original + {len(net_chord)} chords)")
 
     # 1) raw tables -------------------------------------------------------
-    df_real, df_chord, best_real, best_chord = match_lines_real_and_chord(
+    df_real, df_chord, best_real, best_chord, df_metrics = match_lines_real_and_chord(
         dlr_lines, network_lines, cfg=dlr_cfg)
+
+    export_results(
+        df_metrics,
+        Path(config["paths"]["output"]["matches_dir"]) / "network_graph_metrics.csv"
+    )
 
     # 2) one-to-one view --------------------------------------------------
     df_real = (df_real.sort_values("score", ascending=False)

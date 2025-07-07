@@ -24,3 +24,8 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 
 # Install dependencies
 pip install -r requirements.txt
+
+## Data Sources
+
+- Transmission lines and transformers in the Core-TSO (JAO): [https://www.jao.eu/static-grid-model](https://www.jao.eu/static-grid-model). This data is of public domain. Second release. Accessed: 06.09.2022.
+- PyPSA Eur lines: Prebuilt Electricity Network for PyPSA-Eur based on OpenStreetMap Data (Published November 13, 2024 | Version 0.6) (https://zenodo.org/records/14144752)
