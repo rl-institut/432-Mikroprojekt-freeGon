@@ -52,32 +52,56 @@ def load_jao_lines():
 
     return jao_gdf
 
+# ------------------------------------------------------------------
+# helper – guarantee an integer `circuits` column
+# ------------------------------------------------------------------
+def _ensure_circuits_col(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add / fix a `circuits` column:
 
-# Load network lines data, excluding 110kV lines
+    1. If `num_parallel` exists, copy it (default 1).
+    2. Otherwise default to 1.
+    """
+    if 'circuits' not in df.columns:
+        df['circuits'] = (
+            df['num_parallel'].fillna(1).astype(float).round().astype(int)
+            if 'num_parallel' in df.columns
+            else 1
+        )
+    else:
+        mask = df['circuits'].isna()
+        if mask.any() and 'num_parallel' in df.columns:
+            df.loc[mask, 'circuits'] = df.loc[mask, 'num_parallel'].fillna(1)
+        df['circuits'] = df['circuits'].fillna(1).astype(float).round().astype(int)
+    return df
+
+
 def load_network_lines():
     network_df = pd.read_csv(network_lines_path)
 
-    # Exclude 110kV lines
+    # Exclude 110 kV
     network_df = network_df[network_df['v_nom'] != 110]
 
-    # Create GeoDataFrame
+    # GeoDataFrame
     geometry = network_df['geometry'].apply(parse_linestring)
     network_gdf = gpd.GeoDataFrame(network_df, geometry=geometry)
     network_gdf = network_gdf.explode(index_parts=False, ignore_index=True)
 
-    # Extract start and end points
-    network_gdf['start_point'] = network_gdf.geometry.apply(lambda x: Point(x.coords[0]))
-    network_gdf['end_point'] = network_gdf.geometry.apply(lambda x: Point(x.coords[-1]))
+    # endpoints
+    network_gdf['start_point'] = network_gdf.geometry.apply(lambda g: Point(g.coords[0]))
+    network_gdf['end_point']   = network_gdf.geometry.apply(lambda g: Point(g.coords[-1]))
 
-    # Reset index to make sure it's continuous
-    network_gdf = network_gdf.reset_index(drop=True)
+    # ---- NEW: make sure every row knows how many circuits ----
+    network_gdf = _ensure_circuits_col(network_gdf)
 
-    return network_gdf
+    # tidy index
+    return network_gdf.reset_index(drop=True)
+
+
 
 
 # Add this import at the top of your file
 from rtree import index
-
 
 def find_nearest_points(jao_gdf, network_gdf, max_alternatives=5, distance_threshold_meters=1000, debug_lines=None):
     """
@@ -314,200 +338,928 @@ def find_nearest_points(jao_gdf, network_gdf, max_alternatives=5, distance_thres
     return nearest_points_dict
 
 
+import math
+import pandas as pd
 
-# Function to allocate electrical parameters from JAO to network lines - using CSV length data
+def _to_km(value):
+    """Best-effort: treat 'value' as km if it's already small, as meters if very large."""
+    if value is None or pd.isna(value):
+        return 0.0
+    v = float(value)
+    # Heuristic: lengths > 1000 are probably meters
+    return v / 1000.0 if v > 1000 else v
+
+def _get_first_existing(series, *candidates):
+    for c in candidates:
+        if c in series and pd.notna(series[c]):
+            return series[c]
+    return None
+
+def _find_row_by_id(df, key):
+    """Try common id/name columns to find a single row matching key."""
+    if key is None:
+        return None
+    candidates = ['id', 'ID', 'jao_id', 'JAO_ID', 'network_id', 'name']
+    for col in candidates:
+        if col in df.columns:
+            try:
+                hit = df[df[col] == key]
+                if len(hit) == 1:
+                    return hit.iloc[0]
+            except Exception:
+                pass
+    # Also try index name
+    try:
+        if key in df.index:
+            return df.loc[key]
+    except Exception:
+        pass
+    return None
+
+import pandas as pd
+
+def _num(x):
+    """Parse numeric values; return None for None/''/'nan' etc."""
+    if x is None:
+        return None
+    if isinstance(x, str) and x.strip() == "":
+        return None
+    try:
+        v = float(x)
+    except Exception:
+        return None
+    if pd.isna(v):
+        return None
+    return v
+
+def _extract_jao_params(result, jao_gdf):
+    """
+    Returns a dict with:
+      jao_length_km, jao_r_total, jao_x_total, jao_b_total,
+      jao_r_per_km, jao_x_per_km, jao_b_per_km
+
+    Robust to None/missing totals; prefers per‑km if available.
+    """
+    out = {
+        'jao_length_km': 0.0,
+        'jao_r_total': None, 'jao_x_total': None, 'jao_b_total': None,
+        'jao_r_per_km': None, 'jao_x_per_km': None, 'jao_b_per_km': None
+    }
+
+    # --- length ---
+    if _num(result.get('jao_length_km')) is not None:
+        out['jao_length_km'] = float(result['jao_length_km'])
+    elif _num(result.get('jao_length')) is not None:
+        # your _to_km(...) helper converts m→km when needed
+        out['jao_length_km'] = _to_km(result['jao_length'])
+    else:
+        row = _find_row_by_id(jao_gdf, result.get('jao_id'))
+        if row is not None:
+            Lcand = _num(row.get('length_km'))
+            if Lcand is None:
+                Lcand = _num(row.get('length'))
+                Lcand = _to_km(Lcand) if Lcand is not None else None
+            out['jao_length_km'] = Lcand or 0.0
+
+    L = max(out['jao_length_km'], 1e-9)
+
+    # Helper to compute totals from per-km
+    def apply_per_km(rkm, xkm, bkm):
+        if rkm is not None: out['jao_r_per_km'] = rkm; out['jao_r_total'] = rkm * L
+        if xkm is not None: out['jao_x_per_km'] = xkm; out['jao_x_total'] = xkm * L
+        if bkm is not None: out['jao_b_per_km'] = bkm; out['jao_b_total'] = bkm * L
+
+    # Helper to compute per-km from totals
+    def apply_totals(rt, xt, bt):
+        if rt is not None: out['jao_r_total'] = rt; out['jao_r_per_km'] = rt / L
+        if xt is not None: out['jao_x_total'] = xt; out['jao_x_per_km'] = xt / L
+        if bt is not None: out['jao_b_total'] = bt; out['jao_b_per_km'] = bt / L
+
+    # --- Priority 1: per‑km already on result ---
+    rkm_res = _num(result.get('jao_r_per_km'))
+    xkm_res = _num(result.get('jao_x_per_km'))
+    bkm_res = _num(result.get('jao_b_per_km'))
+    if any(v is not None for v in (rkm_res, xkm_res, bkm_res)):
+        apply_per_km(rkm_res, xkm_res, bkm_res)
+
+    # --- Priority 2: totals on result (only if not already filled) ---
+    if out['jao_r_total'] is None or out['jao_x_total'] is None or out['jao_b_total'] is None:
+        rt_res = _num(result.get('jao_r'))
+        xt_res = _num(result.get('jao_x'))
+        bt_res = _num(result.get('jao_b'))
+        if any(v is not None for v in (rt_res, xt_res, bt_res)):
+            apply_totals(rt_res, xt_res, bt_res)
+
+    # --- Priority 3: fetch from jao_gdf (per‑km preferred, else totals) ---
+    if (out['jao_r_total'] is None) or (out['jao_x_total'] is None) or (out['jao_b_total'] is None) \
+       or (out['jao_r_per_km'] is None) or (out['jao_x_per_km'] is None) or (out['jao_b_per_km'] is None):
+        row = _find_row_by_id(jao_gdf, result.get('jao_id'))
+        if row is not None:
+            # try per‑km first
+            rkm = _num(row.get('R_per_km') or row.get('r_per_km'))
+            xkm = _num(row.get('X_per_km') or row.get('x_per_km'))
+            bkm = _num(row.get('B_per_km') or row.get('b_per_km'))
+            if any(v is not None for v in (rkm, xkm, bkm)):
+                # only fill what’s still missing
+                if out['jao_r_per_km'] is None or out['jao_r_total'] is None:
+                    apply_per_km(rkm, None, None)
+                if out['jao_x_per_km'] is None or out['jao_x_total'] is None:
+                    apply_per_km(None, xkm, None)
+                if out['jao_b_per_km'] is None or out['jao_b_total'] is None:
+                    apply_per_km(None, None, bkm)
+            else:
+                # try totals
+                rt = _num(row.get('R_total') or row.get('R'))
+                xt = _num(row.get('X_total') or row.get('X'))
+                bt = _num(row.get('B_total') or row.get('B'))
+                if any(v is not None for v in (rt, xt, bt)):
+                    if out['jao_r_total'] is None or out['jao_r_per_km'] is None:
+                        apply_totals(rt, None, None)
+                    if out['jao_x_total'] is None or out['jao_x_per_km'] is None:
+                        apply_totals(None, xt, None)
+                    if out['jao_b_total'] is None or out['jao_b_per_km'] is None:
+                        apply_totals(None, None, bt)
+
+    return out
+
+
+def _extract_network_segment_params(net_row):
+    """
+    Return length_km, original_totals, original_per_km
+    The **totals/per-km are normalised to ONE circuit**.
+    If the network row already represents multiple circuits
+    (via 'circuits' or 'num_parallel'), we undo the aggregation:
+       R, X  →  divide by n
+       B     →  multiply by n
+    """
+    n_circ = _num(net_row.get('circuits')) \
+             or _num(net_row.get('num_parallel')) \
+             or 1.0                      # assume single circuit by default
+    n_circ = max(float(n_circ), 1.0)
+
+    length_km = _to_km(_get_first_existing(net_row, 'length_km', 'length'))
+    L = max(length_km, 1e-9)
+
+    # ---- read whatever is there ----
+    r_km = _get_first_existing(net_row, 'R_per_km', 'r_per_km')
+    x_km = _get_first_existing(net_row, 'X_per_km', 'x_per_km')
+    b_km = _get_first_existing(net_row, 'B_per_km', 'b_per_km')
+
+    r_tot = _get_first_existing(net_row, 'R_total', 'R')
+    x_tot = _get_first_existing(net_row, 'X_total', 'X')
+    b_tot = _get_first_existing(net_row, 'B_total', 'B')
+
+    # ---- derive missing side ----
+    if r_km is None and r_tot is not None:
+        r_km = float(r_tot) / L
+    if x_km is None and x_tot is not None:
+        x_km = float(x_tot) / L
+    if b_km is None and b_tot is not None:
+        b_km = float(b_tot) / L
+
+    if r_tot is None and r_km is not None:
+        r_tot = float(r_km) * L
+    if x_tot is None and x_km is not None:
+        x_tot = float(x_km) * L
+    if b_tot is None and b_km is not None:
+        b_tot = float(b_km) * L
+
+    n = _num(net_row.get('circuits')) or _num(net_row.get('num_parallel')) or 1
+    n = max(1, int(n))
+
+    # ---- **undo aggregation** ----
+    # per-circuit values
+    r_tot_1 = r_tot / n_circ if r_tot is not None else None
+    x_tot_1 = x_tot / n_circ if x_tot is not None else None
+    b_tot_1 = b_tot * n_circ if b_tot is not None else None  # susceptance adds
+    r_km_1  = r_km  / n_circ if r_km  is not None else None
+    x_km_1  = x_km  / n_circ if x_km  is not None else None
+    b_km_1  = b_km  * n_circ if b_km  is not None else None
+
+    return length_km, r_tot_1, x_tot_1, b_tot_1, r_km_1, x_km_1, b_km_1
+
+
+
+# --- helper utilities inside create_enhanced_summary_table ---
+def _is_num(x):
+    try:
+        return x is not None and not pd.isna(x) and isinstance(float(x), float)
+    except Exception:
+        return False
+
+def _first_col(d, candidates):
+    for c in candidates:
+        if c in d.columns:
+            return c
+    return None
+
+def _get_len_km_from_result_or_gdf(res, gdf, jao_id_val):
+    # prefer length on result
+    if _is_num(res.get('jao_length_km')):
+        return float(res['jao_length_km'])
+    if _is_num(res.get('jao_length')):  # meters
+        return float(res['jao_length']) / 1000.0
+
+    # fallback to gdf: common length column names
+    len_col = _first_col(gdf, ['length_km', 'len_km', 'lengthkm', 'length'])
+    if len_col is not None:
+        row = gdf.loc[gdf[_first_col(gdf, ['jao_id','JAO_ID','id','ID'])] == jao_id_val]
+        if not row.empty:
+            v = row.iloc[0][len_col]
+            # if looks like meters, convert
+            if _is_num(v):
+                v = float(v)
+                if v > 1000:  # likely meters
+                    return v / 1000.0
+                return v
+
+    # as a last resort: try geometry length if present (assumes meters)
+    if 'geometry' in gdf.columns:
+        id_col = _first_col(gdf, ['jao_id','JAO_ID','id','ID'])
+        if id_col:
+            row = gdf.loc[gdf[id_col] == jao_id_val]
+            if not row.empty:
+                try:
+                    L = row.iloc[0].geometry.length
+                    if _is_num(L):
+                        L = float(L)
+                        return L / 1000.0 if L > 1000 else L
+                except Exception:
+                    pass
+    return None
+
+def _get_jao_params(res, gdf):
+    """
+    Return dict with totals & per-km for (r,x,b) using:
+    1) values already in `res`
+    2) fallback to jao_gdf columns if needed
+    Computes missing totals/per-km from length when possible.
+    """
+    out = {
+        'length_km': None,
+        'r_total': None, 'x_total': None, 'b_total': None,
+        'r_km': None, 'x_km': None, 'b_km': None
+    }
+
+    jao_id_val = res.get('jao_id')
+    L = _get_len_km_from_result_or_gdf(res, gdf, jao_id_val)
+    if _is_num(L):
+        out['length_km'] = float(L)
+
+    # 1) take from result if present
+    if _is_num(res.get('jao_r')): out['r_total'] = float(res['jao_r'])
+    if _is_num(res.get('jao_x')): out['x_total'] = float(res['jao_x'])
+    if _is_num(res.get('jao_b')): out['b_total'] = float(res['jao_b'])
+    if _is_num(res.get('jao_r_per_km')): out['r_km'] = float(res['jao_r_per_km'])
+    if _is_num(res.get('jao_x_per_km')): out['x_km'] = float(res['jao_x_per_km'])
+    if _is_num(res.get('jao_b_per_km')): out['b_km'] = float(res['jao_b_per_km'])
+
+    have_all = all(_is_num(out[k]) for k in ['r_total','x_total','b_total','r_km','x_km','b_km'])
+    # 2) fallback to gdf only if anything missing
+    if not have_all:
+        id_col = _first_col(gdf, ['jao_id','JAO_ID','id','ID'])
+        row = gdf.loc[gdf[id_col] == jao_id_val] if id_col else pd.DataFrame()
+        if not row.empty:
+            row = row.iloc[0]
+            # candidate column sets (adjust if your column names differ)
+            totals_cands = [('R','X','B'), ('r_total','x_total','b_total'), ('r','x','b')]
+            perkm_cands  = [('R_per_km','X_per_km','B_per_km'), ('r_km','x_km','b_km'), ('r_per_km','x_per_km','b_per_km')]
+
+            # try totals
+            for cols in totals_cands:
+                Rc, Xc, Bc = cols
+                if Rc in row and Xc in row and Bc in row:
+                    if _is_num(row[Rc]) and out['r_total'] is None: out['r_total'] = float(row[Rc])
+                    if _is_num(row[Xc]) and out['x_total'] is None: out['x_total'] = float(row[Xc])
+                    if _is_num(row[Bc]) and out['b_total'] is None: out['b_total'] = float(row[Bc])
+                    break
+            # try per-km
+            for cols in perkm_cands:
+                Rkc, Xkc, Bkc = cols
+                if Rkc in row and Xkc in row and Bkc in row:
+                    if _is_num(row[Rkc]) and out['r_km'] is None: out['r_km'] = float(row[Rkc])
+                    if _is_num(row[Xkc]) and out['x_km'] is None: out['x_km'] = float(row[Xkc])
+                    if _is_num(row[Bkc]) and out['b_km'] is None: out['b_km'] = float(row[Bkc])
+                    break
+
+    # 3) complete missing totals/per-km using length
+    L = out['length_km']
+    if _is_num(L) and L > 0:
+        if _is_num(out['r_total']) and not _is_num(out['r_km']):
+            out['r_km'] = out['r_total'] / L
+        if _is_num(out['x_total']) and not _is_num(out['x_km']):
+            out['x_km'] = out['x_total'] / L
+        if _is_num(out['b_total']) and not _is_num(out['b_km']):
+            out['b_km'] = out['b_total'] / L
+
+        if _is_num(out['r_km']) and not _is_num(out['r_total']):
+            out['r_total'] = out['r_km'] * L
+        if _is_num(out['x_km']) and not _is_num(out['x_total']):
+            out['x_total'] = out['x_km'] * L
+        if _is_num(out['b_km']) and not _is_num(out['b_total']):
+            out['b_total'] = out['b_km'] * L
+
+    return out
+# --- end helpers ---
+
 def allocate_electrical_parameters(jao_gdf, network_gdf, matching_results):
-    # Enhanced results with electrical parameters
-    enhanced_results = []
+    """
+    For each matched JAO line:
+      - Read JAO per-km parameters
+      - For each network segment, check if it represents parallel circuits
+      - Calculate per-circuit and aggregate-equivalent parameters
+      - Ensure each network line is only allocated parameters once
+      - Compute per-km diffs vs network per-km
+    """
+    # Track which network lines have already been allocated parameters
+    allocated_network_ids = set()
 
-    for result in matching_results:
-        if result['matched'] and result['network_ids']:
-            jao_id = result['jao_id']
-            jao_rows = jao_gdf[jao_gdf['id'].astype(str) == jao_id]
+    # Sort results to process non-duplicates first
+    sorted_results = sorted(matching_results, key=lambda r: r.get('is_duplicate', False))
 
-            if jao_rows.empty:
-                print(f"Warning: JAO ID {jao_id} not found in JAO GeoDataFrame")
-                enhanced_results.append(result.copy())
+    print("\n=== ALLOCATING ELECTRICAL PARAMETERS WITH PARALLEL CIRCUIT HANDLING ===")
+
+    for result in sorted_results:
+        jao_id = result.get('jao_id', 'unknown')
+        print(f"Processing JAO {jao_id}")
+
+        # Skip if not matched or no network lines
+        if not result.get('matched', False) or not result.get('network_ids'):
+            continue
+
+        # Flag for duplicate JAOs
+        is_duplicate = result.get('is_duplicate', False)
+
+        # Get JAO parameters
+        jp = _extract_jao_params(result, jao_gdf)
+        result['jao_length_km'] = jp['jao_length_km']
+        result['jao_r'] = jp['jao_r_total']
+        result['jao_x'] = jp['jao_x_total']
+        result['jao_b'] = jp['jao_b_total']
+        result['jao_r_per_km'] = jp['jao_r_per_km']
+        result['jao_x_per_km'] = jp['jao_x_per_km']
+        result['jao_b_per_km'] = jp['jao_b_per_km']
+
+        print(f"  JAO {jao_id} per-km: R={jp['jao_r_per_km']} X={jp['jao_x_per_km']} B={jp['jao_b_per_km']}")
+
+        # Skip if we don't have all JAO parameters
+        if any(v is None for v in (jp['jao_r_per_km'], jp['jao_x_per_km'], jp['jao_b_per_km'])):
+            print(f"  Missing JAO parameters for {jao_id}, skipping")
+            continue
+
+        # New arrays for segments and totals
+        segments = []
+        total_matched_km = 0.0
+        sum_alloc_r = 0.0
+        sum_alloc_x = 0.0
+        sum_alloc_b = 0.0
+
+        for net_id in result.get('network_ids', []):
+            print(f"  Processing network line {net_id}")
+
+            # Get the network row
+            row = _find_row_by_id(network_gdf, net_id)
+            if row is None:
+                print(f"  Network line {net_id} not found in network_gdf")
                 continue
 
-            jao_row = jao_rows.iloc[0]
+            # accept several aliases; use 'circuits' if your normalization above ran
+            def _first_existing_val(row, *names):
+                for n in names:
+                    if n in row and pd.notna(row[n]):
+                        return _num(row[n])
+                return None
 
-            # Get JAO electrical parameters (if available)
-            jao_r = float(jao_row.get('r', 0)) if 'r' in jao_row else 0
-            jao_x = float(jao_row.get('x', 0)) if 'x' in jao_row else 0
-            jao_b = float(jao_row.get('b', 0)) if 'b' in jao_row else 0
+            raw_circuits = _first_existing_val(row, 'circuits', 'num_parallel', 'parallel_num', 'n_circuits')
+            num_parallel = int(raw_circuits or 1)
 
-            # Prioritize using the 'length' column for JAO
-            if 'length' in jao_row:
-                jao_length_km = float(jao_row['length'])
-                print(f"Using 'length' column for JAO {jao_id}: {jao_length_km} km")
+            print(f"  {net_id}: circuits={num_parallel} "
+                  f"(row[circuits]={row.get('circuits', None)}, "
+                  f"row[num_parallel]={row.get('num_parallel', None)}, "
+                  f"row[parallel_num]={row.get('parallel_num', None)})")
+
+            # (optional) inference only if still 1
+            if num_parallel == 1:
+                ...
+
+            # 1. Direct attribute access (for pandas Series)
+            if hasattr(row, 'num_parallel'):
+                try:
+                    np_value = row.num_parallel
+                    print(f"  Direct attribute access found: {np_value}, type: {type(np_value)}")
+                    if pd.notna(np_value) and np_value is not None:
+                        num_parallel = int(float(np_value))
+                        print(f"  Using num_parallel={num_parallel} from direct attribute access")
+                except Exception as e:
+                    print(f"  Error reading num_parallel via attribute: {e}")
+
+            # 2. Dictionary-style access (for dict-like objects)
+            elif hasattr(row, 'get') and callable(row.get):
+                try:
+                    np_value = row.get('num_parallel')
+                    print(f"  Dictionary access found: {np_value}, type: {type(np_value)}")
+                    if pd.notna(np_value) and np_value is not None:
+                        num_parallel = int(float(np_value))
+                        print(f"  Using num_parallel={num_parallel} from dictionary access")
+                except Exception as e:
+                    print(f"  Error reading num_parallel via dict: {e}")
+
+            # 3. Try direct indexing (for pandas Series)
+            elif hasattr(row, '__getitem__'):
+                try:
+                    np_value = row['num_parallel']
+                    print(f"  Indexing found: {np_value}, type: {type(np_value)}")
+                    if pd.notna(np_value) and np_value is not None:
+                        num_parallel = int(float(np_value))
+                        print(f"  Using num_parallel={num_parallel} from indexing")
+                except Exception as e:
+                    print(f"  Error reading num_parallel via indexing: {e}")
+
+            # 4. Special case for Line_17046
+            if net_id == 'Line_17046':
+                print(f"  SPECIAL CASE: Setting num_parallel=2 for {net_id}")
+                num_parallel = 2
+
+            # (optional) Last resort inference if it's still 1
+            if num_parallel == 1:
+                try:
+                    length_km = _to_km(_num(_get_first_existing(row, 'length_km', 'length')))
+                    r_val = _num(_get_first_existing(row, 'r', 'R'))
+                    x_val = _num(_get_first_existing(row, 'x', 'X'))
+
+                    if r_val is not None and length_km and length_km > 0:
+                        r_per_km = r_val / length_km
+                        ratio = jp['jao_r_per_km'] / r_per_km if r_per_km > 0 else 0
+                        if 1.8 <= ratio <= 2.2:
+                            print(f"  Inferred num_parallel=2 based on R ratio {ratio:.2f}")
+                            num_parallel = 2
+                    elif x_val is not None and length_km and length_km > 0:
+                        x_per_km = x_val / length_km
+                        ratio = jp['jao_x_per_km'] / x_per_km if x_per_km > 0 else 0
+                        if 1.8 <= ratio <= 2.2:
+                            print(f"  Inferred num_parallel=2 based on X ratio {ratio:.2f}")
+                            num_parallel = 2
+                except Exception as e:
+                    print(f"  Error inferring num_parallel: {e}")
+
+            print(f"  Final num_parallel value for {net_id}: {num_parallel}")
+
+            # --- STEP 2: Get network parameters ---
+            # Get length in km
+            length_km = _to_km(_get_first_existing(row, 'length_km', 'length'))
+            total_matched_km += length_km
+
+            # Get original aggregate values from network row
+            orig_r_km = _num(_get_first_existing(row, 'r_per_km', 'R_per_km'))
+            orig_x_km = _num(_get_first_existing(row, 'x_per_km', 'X_per_km'))
+            orig_b_km = _num(_get_first_existing(row, 'b_per_km', 'B_per_km'))
+
+            orig_r = _num(_get_first_existing(row, 'r', 'R'))
+            orig_x = _num(_get_first_existing(row, 'x', 'X'))
+            orig_b = _num(_get_first_existing(row, 'b', 'B'))
+
+            # Calculate per-km values if not directly available
+            if orig_r_km is None and orig_r is not None and length_km > 0:
+                orig_r_km = orig_r / length_km
+            if orig_x_km is None and orig_x is not None and length_km > 0:
+                orig_x_km = orig_x / length_km
+            if orig_b_km is None and orig_b is not None and length_km > 0:
+                orig_b_km = orig_b / length_km
+
+            # Calculate total values if not directly available
+            if orig_r is None and orig_r_km is not None:
+                orig_r = orig_r_km * length_km
+            if orig_x is None and orig_x_km is not None:
+                orig_x = orig_x_km * length_km
+            if orig_b is None and orig_b_km is not None:
+                orig_b = orig_b_km * length_km
+
+            # --- STEP 3: Calculate per-circuit values ---
+            # For network row (de-aggregate):
+            orig_r_km_pc = orig_r_km * num_parallel if orig_r_km is not None else None
+            orig_x_km_pc = orig_x_km * num_parallel if orig_x_km is not None else None
+            orig_b_km_pc = orig_b_km / num_parallel if orig_b_km is not None else None
+
+            orig_r_pc = orig_r * num_parallel if orig_r is not None else None
+            orig_x_pc = orig_x * num_parallel if orig_x is not None else None
+            orig_b_pc = orig_b / num_parallel if orig_b is not None else None
+
+            # --- STEP 4: Calculate aggregate-equivalent values for allocation ---
+            # JAO values are per-circuit, so adjust for num_parallel:
+            agg_r_km = jp['jao_r_per_km'] / num_parallel
+            agg_x_km = jp['jao_x_per_km'] / num_parallel
+            agg_b_km = jp['jao_b_per_km'] * num_parallel
+
+            agg_r = agg_r_km * length_km
+            agg_x = agg_x_km * length_km
+            agg_b = agg_b_km * length_km
+
+            # --- STEP 5: Determine allocation status ---
+            already_allocated = net_id in allocated_network_ids
+
+            if is_duplicate:
+                allocation_status = "Duplicate JAO (skip)"
+                alloc_r = alloc_x = alloc_b = 0.0
+            elif already_allocated:
+                allocation_status = "Already allocated (skip)"
+                alloc_r = alloc_x = alloc_b = 0.0
             else:
-                # Fallback to other methods if 'length' is not available
-                jao_length_km = result.get('jao_length', 0) / 1000 if 'jao_length' in result else 0
+                allocation_status = "Applied"
+                alloc_r = agg_r
+                alloc_x = agg_x
+                alloc_b = agg_b
 
-                # If length is still 0, try to calculate it from geometry
-                if jao_length_km == 0 and hasattr(jao_row, 'geometry') and jao_row.geometry is not None:
-                    try:
-                        # Try to get length in meters and convert to km
-                        jao_length_m = float(jao_row.geometry.length)
-                        jao_length_km = jao_length_m / 1000
-                        print(f"Calculated JAO length for {jao_id}: {jao_length_km} km")
-                    except Exception as e:
-                        print(f"Error calculating JAO length for {jao_id}: {e}")
+                # Mark as allocated
+                allocated_network_ids.add(net_id)
 
-            # Calculate JAO per-km values (with safety check for zero division)
-            jao_r_per_km = jao_r / jao_length_km if jao_length_km > 0 else 0
-            jao_x_per_km = jao_x / jao_length_km if jao_length_km > 0 else 0
-            jao_b_per_km = jao_b / jao_length_km if jao_length_km > 0 else 0
+                # Add to running sums
+                sum_alloc_r += alloc_r
+                sum_alloc_x += alloc_x
+                sum_alloc_b += alloc_b
 
-            # Get matched network lines
-            matched_lines = []
-            total_network_length_km = 0
+            # --- STEP 6: Calculate difference percentages ---
+            def diff_pct(a, b):
+                if a is None or b is None or abs(b) < 1e-9:
+                    return float('inf')
+                return 100.0 * (a - b) / abs(b)
 
-            # First, calculate total network length using the 'length' column from CSV
-            for network_id in result['network_ids']:
-                network_rows = network_gdf[network_gdf['id'].astype(str) == network_id]
+            # Per-circuit differences
+            r_diff_pc = diff_pct(jp['jao_r_per_km'], orig_r_km_pc)
+            x_diff_pc = diff_pct(jp['jao_x_per_km'], orig_x_km_pc)
+            b_diff_pc = diff_pct(jp['jao_b_per_km'], orig_b_km_pc)
 
-                if not network_rows.empty:
-                    line = network_rows.iloc[0]
-                    line_length_km = 0
+            # Aggregate differences
+            r_diff_agg = diff_pct(agg_r_km, orig_r_km)
+            x_diff_agg = diff_pct(agg_x_km, orig_x_km)
+            b_diff_agg = diff_pct(agg_b_km, orig_b_km)
 
-                    # Prioritize using the 'length' column from CSV
-                    if 'length' in line:
-                        try:
-                            line_length_km = float(line['length'])
-                            print(f"Using 'length' from CSV for {network_id}: {line_length_km} km")
-                        except Exception as e:
-                            print(f"Error using 'length' from CSV for {network_id}: {e}")
+            # --- STEP 7: Create segment data ---
+            segment = {
+                'network_id': net_id,
+                'length_km': length_km,
+                'num_parallel': num_parallel,
+                'segment_ratio': length_km / max(jp['jao_length_km'], 1e-9),
 
-                    # Only fallback to geometry if 'length' is not available or zero
-                    if line_length_km == 0 and hasattr(line, 'geometry') and line.geometry is not None:
-                        try:
-                            line_length_m = float(line.geometry.length)
-                            line_length_km = line_length_m / 1000
-                            print(f"Calculated length from geometry for {network_id}: {line_length_km} km")
-                        except Exception as e:
-                            print(f"Error calculating length from geometry for {network_id}: {e}")
+                # Allocated values (adjusted for num_parallel)
+                'allocated_r': alloc_r,
+                'allocated_x': alloc_x,
+                'allocated_b': alloc_b,
+                'allocated_r_per_km': agg_r_km,
+                'allocated_x_per_km': agg_x_km,
+                'allocated_b_per_km': agg_b_km,
 
-                    # Add to total network length
-                    total_network_length_km += line_length_km
+                # Original values (as stored in network_gdf)
+                'original_r': orig_r or 0.0,
+                'original_x': orig_x or 0.0,
+                'original_b': orig_b or 0.0,
+                'original_r_per_km': orig_r_km or 0.0,
+                'original_x_per_km': orig_x_km or 0.0,
+                'original_b_per_km': orig_b_km or 0.0,
 
-            # If total network length is still 0, use the JAO length as a fallback
-            if total_network_length_km == 0:
-                total_network_length_km = jao_length_km
-                print(f"Warning: Using JAO length as fallback for network length for JAO {jao_id}")
+                # Per-circuit values for comparison
+                'jao_r_per_km_pc': jp['jao_r_per_km'],
+                'jao_x_per_km_pc': jp['jao_x_per_km'],
+                'jao_b_per_km_pc': jp['jao_b_per_km'],
+                'original_r_per_km_pc': orig_r_km_pc or 0.0,
+                'original_x_per_km_pc': orig_x_km_pc or 0.0,
+                'original_b_per_km_pc': orig_b_km_pc or 0.0,
 
-            # Process each matched network line
-            for network_id in result['network_ids']:
-                network_rows = network_gdf[network_gdf['id'].astype(str) == network_id]
+                # Difference percentages
+                'r_diff_percent_pc': r_diff_pc,
+                'x_diff_percent_pc': x_diff_pc,
+                'b_diff_percent_pc': b_diff_pc,
+                'r_diff_percent': r_diff_agg,
+                'x_diff_percent': x_diff_agg,
+                'b_diff_percent': b_diff_agg,
 
-                if not network_rows.empty:
-                    line = network_rows.iloc[0]
-                    line_length_km = 0
+                'allocation_status': allocation_status
+            }
 
-                    # Prioritize using the 'length' column from CSV
-                    if 'length' in line:
-                        try:
-                            line_length_km = float(line['length'])
-                        except Exception as e:
-                            print(f"Error using 'length' from CSV for {network_id}: {e}")
+            segments.append(segment)
 
-                    # Only fallback to geometry if 'length' is not available or zero
-                    if line_length_km == 0 and hasattr(line, 'geometry') and line.geometry is not None:
-                        try:
-                            line_length_m = float(line.geometry.length)
-                            line_length_km = line_length_m / 1000
-                        except Exception as e:
-                            print(f"Error calculating length from geometry for {network_id}: {e}")
+        # Update result with segment data and totals
+        result['matched_lines_data'] = segments
+        result['matched_km'] = total_matched_km
+        result['coverage_ratio'] = total_matched_km / max(jp['jao_length_km'], 1e-9)
+        result['allocated_r_sum'] = sum_alloc_r
+        result['allocated_x_sum'] = sum_alloc_x
+        result['allocated_b_sum'] = sum_alloc_b
 
-                    # Calculate length ratio for this segment
-                    segment_ratio = line_length_km / total_network_length_km if total_network_length_km > 0 else 0
+        # Calculate residuals
+        def residual_pct(total, alloc):
+            if total is None or abs(total) < 1e-12:
+                return float('inf')
+            return 100.0 * (total - alloc) / abs(total)
 
-                    # Allocate JAO parameters based on length ratio
-                    allocated_r = jao_r * segment_ratio
-                    allocated_x = jao_x * segment_ratio
-                    allocated_b = jao_b * segment_ratio
+        result['residual_r_percent'] = residual_pct(result['jao_r'], sum_alloc_r)
+        result['residual_x_percent'] = residual_pct(result['jao_x'], sum_alloc_x)
+        result['residual_b_percent'] = residual_pct(result['jao_b'], sum_alloc_b)
 
-                    # Get original network parameters (if available)
-                    original_r = float(line.get('r', 0)) if 'r' in line else 0
-                    original_x = float(line.get('x', 0)) if 'x' in line else 0
-                    original_b = float(line.get('b', 0)) if 'b' in line else 0
+    return matching_results
 
-                    # Calculate per-km values for the network line (with safety checks)
-                    if line_length_km > 0:
-                        original_r_per_km = original_r / line_length_km
-                        original_x_per_km = original_x / line_length_km
-                        original_b_per_km = original_b / line_length_km
 
-                        allocated_r_per_km = allocated_r / line_length_km
-                        allocated_x_per_km = allocated_x / line_length_km
-                        allocated_b_per_km = allocated_b / line_length_km
-                    else:
-                        # If length is zero, use JAO per-km values as fallback
-                        original_r_per_km = 0
-                        original_x_per_km = 0
-                        original_b_per_km = 0
+def _get_circuits_from_row(row):
+    # prefer a normalized 'circuits' col if present, else look for num_parallel
+    raw = _num(row.get('circuits'))
+    if raw is None:
+        raw = _num(row.get('num_parallel'))
+    return int(raw or 1)
 
-                        allocated_r_per_km = jao_r_per_km
-                        allocated_x_per_km = jao_x_per_km
-                        allocated_b_per_km = jao_b_per_km
 
-                    # Calculate differences (with safety checks)
-                    if original_r != 0:
-                        r_diff_percent = ((allocated_r - original_r) / original_r * 100)
-                    else:
-                        r_diff_percent = float('inf')
+def ensure_network_segment_tables(matching_results, jao_gdf, network_gdf, freq_hz=50.0):
+    """
+    For matched results that lack 'matched_lines_data', synthesize segment tables from network_gdf.
+    Also computes matched_km and coverage_ratio.
+    This is a non-destructive "fill only if missing" pass.
+    """
+    import math
+    import numpy as np
+    import pandas as pd
 
-                    if original_x != 0:
-                        x_diff_percent = ((allocated_x - original_x) / original_x * 100)
-                    else:
-                        x_diff_percent = float('inf')
+    def _num(x):
+        try:
+            if x is None or (isinstance(x, float) and math.isnan(x)):
+                return None
+            if isinstance(x, (int, float)):
+                return float(x)
+            s = str(x).strip().replace(",", ".")
+            return float(s)
+        except Exception:
+            return None
 
-                    if original_b != 0:
-                        b_diff_percent = ((allocated_b - original_b) / original_b * 100)
-                    else:
-                        b_diff_percent = float('inf')
+    def _length_km_from_row(row):
+        # Try common fields: length_km -> length (assumed km) -> totals/geometry as last resort
+        if 'length_km' in row and pd.notna(row['length_km']):
+            v = _num(row['length_km'])
+            if v is not None and v > 0:
+                return v
+        if 'length' in row and pd.notna(row['length']):
+            v = _num(row['length'])
+            if v is not None and v > 0:
+                return v
+        # Fallback: geometry length—WARNING: only valid if in meters with projected CRS
+        try:
+            geom = row.get('geometry')
+            if geom is not None:
+                L = float(geom.length)
+                # Guess unit: if really long, assume meters and convert to km
+                return L / 1000.0 if L > 10_000 else L  # heuristic
+        except Exception:
+            pass
+        return None
 
-                    # Add to matched lines
-                    matched_lines.append({
-                        'network_id': network_id,
-                        'length_km': line_length_km,
-                        'segment_ratio': segment_ratio,
-                        'allocated_r': allocated_r,
-                        'allocated_x': allocated_x,
-                        'allocated_b': allocated_b,
-                        'original_r': original_r,
-                        'original_x': original_x,
-                        'original_b': original_b,
-                        'allocated_r_per_km': allocated_r_per_km,
-                        'allocated_x_per_km': allocated_x_per_km,
-                        'allocated_b_per_km': allocated_b_per_km,
-                        'original_r_per_km': original_r_per_km,
-                        'original_x_per_km': original_x_per_km,
-                        'original_b_per_km': original_b_per_km,
-                        'r_diff_percent': r_diff_percent,
-                        'x_diff_percent': x_diff_percent,
-                        'b_diff_percent': b_diff_percent
-                    })
+    def _per_km_from_row(row):
+        """
+        Return (r_per_km, x_per_km, b_per_km). Uses, in order:
+        - explicit per-km columns
+        - totals / length
+        - R0 / L0 / C0 (L0 in mH/km, C0 in nF/km)
+        - voltage/type defaults (simple constants)
+        """
+        rpk = _num(row.get('R_per_km')) or _num(row.get('r_per_km')) or _num(row.get('R_km')) or _num(row.get('r_km'))
+        xpk = _num(row.get('X_per_km')) or _num(row.get('x_per_km')) or _num(row.get('X_km')) or _num(row.get('x_km'))
+        bpk = _num(row.get('B_per_km')) or _num(row.get('b_per_km')) or _num(row.get('B_km')) or _num(row.get('b_km'))
 
-            # Add enhanced data to result
-            result_with_parameters = result.copy()
-            result_with_parameters['matched_lines_data'] = matched_lines
-            result_with_parameters['jao_r'] = jao_r
-            result_with_parameters['jao_x'] = jao_x
-            result_with_parameters['jao_b'] = jao_b
-            result_with_parameters['jao_length_km'] = jao_length_km
-            result_with_parameters['jao_r_per_km'] = jao_r_per_km
-            result_with_parameters['jao_x_per_km'] = jao_x_per_km
-            result_with_parameters['jao_b_per_km'] = jao_b_per_km
-            result_with_parameters['total_network_length_km'] = total_network_length_km
+        if rpk is not None and xpk is not None and bpk is not None:
+            return rpk, xpk, bpk
 
-            enhanced_results.append(result_with_parameters)
+        # Totals / length
+        Lkm = _length_km_from_row(row)
+        rt = _num(row.get('r')) or _num(row.get('R'))
+        xt = _num(row.get('x')) or _num(row.get('X'))
+        bt = _num(row.get('b')) or _num(row.get('B'))
+        if Lkm and Lkm > 0 and (rt is not None or xt is not None or bt is not None):
+            return (
+                (rt / Lkm) if (rt is not None) else None,
+                (xt / Lkm) if (xt is not None) else None,
+                (bt / Lkm) if (bt is not None) else None
+            )
+
+        # R0/L0/C0 (L0 mH/km → H/km; C0 nF/km → F/km)
+        R0 = _num(row.get('R0'))
+        L0_mH = _num(row.get('L0')) or _num(row.get('L'))  # mH/km
+        C0_nF = _num(row.get('C0')) or _num(row.get('C'))  # nF/km
+        if (R0 is not None) or (L0_mH is not None) or (C0_nF is not None):
+            rpk = R0 if R0 is not None else None
+            xpk = (2*math.pi*freq_hz*(L0_mH*1e-3)) if L0_mH is not None else None
+            bpk = (2*math.pi*freq_hz*(C0_nF*1e-9)) if C0_nF is not None else None
+            return rpk, xpk, bpk
+
+        # Very coarse defaults by voltage for OHL (from your doc; 380≈400 here)
+        v = _num(row.get('v_nom'))
+        # (R [ohm/km], X [ohm/km], B [S/km]) approximations
+        defaults = {
+            110: (0.109, 2*math.pi*freq_hz*(1.2e-3), 2*math.pi*freq_hz*(9.5e-9)),
+            220: (0.109, 2*math.pi*freq_hz*(1.0e-3), 2*math.pi*freq_hz*(11e-9)),
+            380: (0.028, 2*math.pi*freq_hz*(0.8e-3), 2*math.pi*freq_hz*(14e-9)),
+            400: (0.028, 2*math.pi*freq_hz*(0.8e-3), 2*math.pi*freq_hz*(14e-9)),
+        }
+        if v in defaults:
+            return defaults[v]
+        return None, None, None
+
+    # Pre-index network_gdf by string id for quick lookups
+    if 'id' not in network_gdf.columns:
+        raise KeyError("network_gdf is missing 'id' column.")
+    net_by_id = {str(row['id']): row for _, row in network_gdf.iterrows()}
+
+    updated = 0
+    for res in matching_results:
+        if not res.get('matched'):
+            continue
+        # Skip if we already have segment data
+        if res.get('matched_lines_data'):
+            # Still fix coverage if missing
+            if res.get('coverage_ratio') is None:
+                total_km = sum((_num(seg.get('length_km')) or 0.0) for seg in res['matched_lines_data'])
+                Ljao = _num(res.get('jao_length_km')) or (_num(res.get('jao_length')) and _num(res['jao_length'])/1000.0)
+                if Ljao and Ljao > 0:
+                    res['matched_km'] = total_km
+                    res['coverage_ratio'] = max(0.0, min(1.0, total_km / Ljao))
+            continue
+
+        nids = res.get('network_ids') or []
+        nids = [str(n) for n in nids if n is not None]
+        if not nids:
+            continue
+
+        # Collect lengths and per-km params
+        def _get_circuits_from_row(row):
+            val = _num(row.get('circuits'))
+            if val is None:
+                val = _num(row.get('num_parallel'))
+            return int(val or 1)
+
+        segs = []
+        total_len_km = 0.0
+        for nid in nids:
+            row = net_by_id.get(nid)
+            if row is None:
+                continue
+            Lkm = _length_km_from_row(row)
+            if Lkm is None or Lkm <= 0:
+                continue
+            rpk, xpk, bpk = _per_km_from_row(row)
+            num_par = _get_circuits_from_row(row)  # <-- add
+            segs.append({
+                'network_id': nid,
+                'length_km': Lkm,
+                'r_per_km_net': rpk,
+                'x_per_km_net': xpk,
+                'b_per_km_net': bpk,
+                'num_parallel': num_par,  # <-- add
+            })
+            total_len_km += Lkm
+
+        if not segs:
+            # nothing we can do
+            continue
+
+        # --- JAO totals and (fallback) per-km (per circuit) ---
+        jao_r = _num(res.get('jao_r'))
+        jao_x = _num(res.get('jao_x'))
+        jao_b = _num(res.get('jao_b'))
+
+        # per-km from result if present, else derive from length
+        Ljao_km = _num(res.get('jao_length_km'))
+        if Ljao_km is None:
+            Lm = _num(res.get('jao_length'))
+            if Lm is not None:
+                Ljao_km = Lm / 1000.0
+
+        jao_r_pk = _num(res.get('jao_r_per_km')) if _num(res.get('jao_r_per_km')) is not None else (
+            (jao_r / Ljao_km) if (jao_r is not None and Ljao_km and Ljao_km > 0) else None
+        )
+        jao_x_pk = _num(res.get('jao_x_per_km')) if _num(res.get('jao_x_per_km')) is not None else (
+            (jao_x / Ljao_km) if (jao_x is not None and Ljao_km and Ljao_km > 0) else None
+        )
+        jao_b_pk = _num(res.get('jao_b_per_km')) if _num(res.get('jao_b_per_km')) is not None else (
+            (jao_b / Ljao_km) if (jao_b is not None and Ljao_km and Ljao_km > 0) else None
+        )
+        # (JAO per-km are per-circuit already)
+        jao_r_pk_pc = jao_r_pk
+        jao_x_pk_pc = jao_x_pk
+        jao_b_pk_pc = jao_b_pk
+
+        out = []
+        alloc_r_sum = alloc_x_sum = alloc_b_sum = 0.0
+
+        def pct_diff(a, b):
+            if a is None or b is None:
+                return float('inf')
+            if b == 0:
+                return float('inf')
+            return 100.0 * (a - b) / b
+
+        for s in segs:
+            ratio = (s['length_km'] / total_len_km) if total_len_km > 0 else 0.0
+
+            # Allocate totals by length ratio
+            alloc_r = jao_r * ratio if jao_r is not None else None
+            alloc_x = jao_x * ratio if jao_x is not None else None
+            alloc_b = jao_b * ratio if jao_b is not None else None
+
+            if alloc_r is not None: alloc_r_sum += alloc_r
+            if alloc_x is not None: alloc_x_sum += alloc_x
+            if alloc_b is not None: alloc_b_sum += alloc_b
+
+            # Per-km from network row
+            rpk = s.get('r_per_km_net')
+            xpk = s.get('x_per_km_net')
+            bpk = s.get('b_per_km_net')
+
+            # Original totals from per-km * length
+            orig_r = (rpk * s['length_km']) if rpk is not None else None
+            orig_x = (xpk * s['length_km']) if xpk is not None else None
+            orig_b = (bpk * s['length_km']) if bpk is not None else None
+
+            # --- Per-circuit equivalents (network side) ---
+            num_par = int(s.get('num_parallel', 1) or 1)
+            orig_r_km_pc = (rpk * num_par) if rpk is not None else None
+            orig_x_km_pc = (xpk * num_par) if xpk is not None else None
+            orig_b_km_pc = (bpk / num_par) if (bpk is not None and num_par) else None
+
+            # Per-circuit diffs vs JAO per-km (per-circuit)
+            r_diff_pc = pct_diff(jao_r_pk_pc, orig_r_km_pc)
+            x_diff_pc = pct_diff(jao_x_pk_pc, orig_x_km_pc)
+            b_diff_pc = pct_diff(jao_b_pk_pc, orig_b_km_pc)
+
+            # Aggregate diffs (allocated totals vs original totals)
+            r_diff_agg = pct_diff(alloc_r, orig_r)
+            x_diff_agg = pct_diff(alloc_x, orig_x)
+            b_diff_agg = pct_diff(alloc_b, orig_b)
+
+            out.append({
+                'network_id': s['network_id'],
+                'length_km': s['length_km'],
+                'num_parallel': num_par,
+                'segment_ratio': ratio,
+
+                # Allocated totals and per-km
+                'allocated_r': alloc_r or 0.0,
+                'allocated_x': alloc_x or 0.0,
+                'allocated_b': alloc_b or 0.0,
+                'allocated_r_per_km': (alloc_r / s['length_km']) if (
+                            alloc_r is not None and s['length_km'] > 0) else 0.0,
+                'allocated_x_per_km': (alloc_x / s['length_km']) if (
+                            alloc_x is not None and s['length_km'] > 0) else 0.0,
+                'allocated_b_per_km': (alloc_b / s['length_km']) if (
+                            alloc_b is not None and s['length_km'] > 0) else 0.0,
+
+                # Original totals and per-km (as stored)
+                'original_r': orig_r or 0.0,
+                'original_x': orig_x or 0.0,
+                'original_b': orig_b or 0.0,
+                'original_r_per_km': rpk or 0.0,
+                'original_x_per_km': xpk or 0.0,
+                'original_b_per_km': bpk or 0.0,
+
+                # Per-circuit values for comparison (network & JAO)
+                'original_r_per_km_pc': orig_r_km_pc or 0.0,
+                'original_x_per_km_pc': orig_x_km_pc or 0.0,
+                'original_b_per_km_pc': orig_b_km_pc or 0.0,
+                'jao_r_per_km_pc': jao_r_pk_pc or 0.0,
+                'jao_x_per_km_pc': jao_x_pk_pc or 0.0,
+                'jao_b_per_km_pc': jao_b_pk_pc or 0.0,
+
+                # Differences
+                'r_diff_percent_pc': r_diff_pc,
+                'x_diff_percent_pc': x_diff_pc,
+                'b_diff_percent_pc': b_diff_pc,
+                'r_diff_percent': r_diff_agg,
+                'x_diff_percent': x_diff_agg,
+                'b_diff_percent': b_diff_agg,
+
+                # Status so the HTML doesn't show "Unknown"
+                'allocation_status': 'Filled by fallback',
+            })
+
+        res['matched_lines_data'] = out
+        res['allocated_r_sum'] = alloc_r_sum if jao_r is not None else 0.0
+        res['allocated_x_sum'] = alloc_x_sum if jao_x is not None else 0.0
+        res['allocated_b_sum'] = alloc_b_sum if jao_b is not None else 0.0
+
+        # Residuals (JAO total minus sum allocated)
+        if jao_r is not None and alloc_r_sum is not None:
+            res['residual_r_percent'] = 100.0 * (jao_r - alloc_r_sum) / jao_r if jao_r else float('inf')
+        if jao_x is not None and alloc_x_sum is not None:
+            res['residual_x_percent'] = 100.0 * (jao_x - alloc_x_sum) / jao_x if jao_x else float('inf')
+        if jao_b is not None and alloc_b_sum is not None:
+            res['residual_b_percent'] = 100.0 * (jao_b - alloc_b_sum) / jao_b if jao_b else float('inf')
+
+        # Coverage
+        Ljao = _num(res.get('jao_length_km')) or (_num(res.get('jao_length')) and _num(res['jao_length'])/1000.0)
+        if Ljao and Ljao > 0:
+            res['matched_km'] = total_len_km
+            res['coverage_ratio'] = max(0.0, min(1.0, total_len_km / Ljao))
         else:
-            # Just copy the unmatched result
-            enhanced_results.append(result.copy())
+            res['matched_km'] = total_len_km
+            res['coverage_ratio'] = 0.0
 
-    return enhanced_results
+        updated += 1
+
+    print(f"ensure_network_segment_tables: filled segment tables for {updated} matched results lacking them.")
+    return matching_results
 
 
 # Build network graph from network lines
@@ -4069,173 +4821,164 @@ def visualize_results_with_duplicates(jao_gdf, network_gdf, matching_results):
 
 
 
-# Create an enhanced summary table with electrical parameters
 def create_enhanced_summary_table(jao_gdf, network_gdf, matching_results):
-    """Create an HTML table with detailed information about the matching results including electrical parameters."""
-    import json
+    """Create an HTML table with detailed information about the matching results including electrical parameters,
+    coverage of matched path, and totals consistency checks."""
+    import pandas as pd
     from pathlib import Path
 
-    # Convert results to DataFrame for easier handling
-    results_df = pd.DataFrame([r for r in matching_results if 'jao_id' in r])
+    # -------- helpers (fallback + safe formatting) ----------
+    def _is_num(x):
+        try:
+            return x is not None and not pd.isna(x) and isinstance(float(x), float)
+        except Exception:
+            return False
 
-    # Create summary statistics
+    def _first_col(df, names):
+        for n in names:
+            if n in df.columns:
+                return n
+        return None
+
+    def _get_len_km_from_result_or_gdf(res, gdf, jao_id_val):
+        # prefer from result
+        if _is_num(res.get('jao_length_km')):
+            return float(res['jao_length_km'])
+        if _is_num(res.get('jao_length')):
+            return float(res['jao_length']) / 1000.0  # meters -> km
+
+        # fallback to gdf by id
+        id_col = _first_col(gdf, ['jao_id', 'JAO_ID', 'id', 'ID'])
+        len_col = _first_col(gdf, ['jao_length_km', 'length_km', 'len_km', 'lengthkm', 'length'])
+        if id_col and len_col:
+            row = gdf.loc[gdf[id_col] == jao_id_val]
+            if not row.empty:
+                v = row.iloc[0][len_col]
+                if _is_num(v):
+                    v = float(v)
+                    return v / 1000.0 if v > 1000 else v  # attempt meters->km if large
+        return None
+
+    def _get_jao_params(res, gdf):
+        """Return dict with length_km, totals and per-km for r/x/b using result first, jao_gdf as fallback."""
+        out = dict(length_km=None, r_total=None, x_total=None, b_total=None, r_km=None, x_km=None, b_km=None)
+        jao_id_val = res.get('jao_id')
+
+        L = _get_len_km_from_result_or_gdf(res, gdf, jao_id_val)
+        if _is_num(L):
+            out['length_km'] = float(L)
+
+        # from result
+        if _is_num(res.get('jao_r')): out['r_total'] = float(res['jao_r'])
+        if _is_num(res.get('jao_x')): out['x_total'] = float(res['jao_x'])
+        if _is_num(res.get('jao_b')): out['b_total'] = float(res['jao_b'])
+        if _is_num(res.get('jao_r_per_km')): out['r_km'] = float(res['jao_r_per_km'])
+        if _is_num(res.get('jao_x_per_km')): out['x_km'] = float(res['jao_x_per_km'])
+        if _is_num(res.get('jao_b_per_km')): out['b_km'] = float(res['jao_b_per_km'])
+
+        # if anything missing, try jao_gdf
+        have_all = all(_is_num(out[k]) for k in ['r_total','x_total','b_total','r_km','x_km','b_km'])
+        if not have_all:
+            id_col = _first_col(jao_gdf, ['jao_id','JAO_ID','id','ID'])
+            row = jao_gdf.loc[jao_gdf[id_col] == jao_id_val] if id_col else pd.DataFrame()
+            if not row.empty:
+                row = row.iloc[0]
+                # totals candidates
+                for Rc, Xc, Bc in [('R','X','B'),
+                                   ('r_total','x_total','b_total'),
+                                   ('r','x','b')]:
+                    if Rc in row and Xc in row and Bc in row:
+                        if _is_num(row[Rc]) and out['r_total'] is None: out['r_total'] = float(row[Rc])
+                        if _is_num(row[Xc]) and out['x_total'] is None: out['x_total'] = float(row[Xc])
+                        if _is_num(row[Bc]) and out['b_total'] is None: out['b_total'] = float(row[Bc])
+                        break
+                # per-km candidates
+                for Rkc, Xkc, Bkc in [('R_per_km','X_per_km','B_per_km'),
+                                      ('r_km','x_km','b_km'),
+                                      ('r_per_km','x_per_km','b_per_km')]:
+                    if Rkc in row and Xkc in row and Bkc in row:
+                        if _is_num(row[Rkc]) and out['r_km'] is None: out['r_km'] = float(row[Rkc])
+                        if _is_num(row[Xkc]) and out['x_km'] is None: out['x_km'] = float(row[Xkc])
+                        if _is_num(row[Bkc]) and out['b_km'] is None: out['b_km'] = float(row[Bkc])
+                        break
+
+        # complete totals/per-km using length
+        if _is_num(out['length_km']) and out['length_km'] > 0:
+            L = out['length_km']
+            if _is_num(out['r_total']) and not _is_num(out['r_km']): out['r_km'] = out['r_total']/L
+            if _is_num(out['x_total']) and not _is_num(out['x_km']): out['x_km'] = out['x_total']/L
+            if _is_num(out['b_total']) and not _is_num(out['b_km']): out['b_km'] = out['b_total']/L
+            if _is_num(out['r_km']) and not _is_num(out['r_total']): out['r_total'] = out['r_km']*L
+            if _is_num(out['x_km']) and not _is_num(out['x_total']): out['x_total'] = out['x_km']*L
+            if _is_num(out['b_km']) and not _is_num(out['b_total']): out['b_total'] = out['b_km']*L
+        return out
+
+    # -------- summary header ----------
+    results_df = pd.DataFrame([r for r in matching_results if 'jao_id' in r])
     total_jao_lines = len(matching_results)
     matched_lines = sum(result.get('matched', False) for result in matching_results)
     unmatched_lines = total_jao_lines - matched_lines
 
-    # Count different types of matches
-    regular_matches = sum(1 for result in matching_results if result.get('matched', False) and
-                          not result.get('is_duplicate', False) and
-                          not result.get('is_geometric_match', False) and
-                          not result.get('is_parallel_circuit', False) and
-                          not result.get('is_parallel_voltage_circuit', False))
+    regular_matches = sum(1 for r in matching_results if r.get('matched', False)
+                          and not r.get('is_duplicate', False)
+                          and not r.get('is_geometric_match', False)
+                          and not r.get('is_parallel_circuit', False)
+                          and not r.get('is_parallel_voltage_circuit', False))
+    duplicate_matches = sum(1 for r in matching_results if r.get('is_duplicate', False))
+    geometric_matches = sum(1 for r in matching_results if r.get('is_geometric_match', False))
+    parallel_matches = sum(1 for r in matching_results if r.get('is_parallel_circuit', False))
+    parallel_voltage_matches = sum(1 for r in matching_results if r.get('is_parallel_voltage_circuit', False))
 
-    duplicate_matches = sum(1 for result in matching_results if result.get('is_duplicate', False))
-    geometric_matches = sum(1 for result in matching_results if result.get('is_geometric_match', False))
-    parallel_matches = sum(1 for result in matching_results if result.get('is_parallel_circuit', False))
-    parallel_voltage_matches = sum(1 for result in matching_results if result.get('is_parallel_voltage_circuit', False))
-
-    # Count specific match qualities
     match_quality_counts = {}
-    for result in matching_results:
-        quality = result.get('match_quality', '')
-        if quality not in match_quality_counts:
-            match_quality_counts[quality] = 0
-        match_quality_counts[quality] += 1
+    for r in matching_results:
+        q = r.get('match_quality', '')
+        match_quality_counts[q] = match_quality_counts.get(q, 0) + 1
 
-    # Create HTML for summary
+    # -------- HTML start ----------
     html_summary = f"""
     <html>
     <head>
         <title>JAO-Network Line Matching Summary with Electrical Parameters</title>
         <style>
-            body {{
-                font-family: Arial, sans-serif;
-                margin: 20px;
-            }}
-            h1, h2, h3 {{
-                color: #333;
-            }}
-            .summary {{
-                margin-bottom: 20px;
-                padding: 15px;
-                background-color: #f5f5f5;
-                border-radius: 5px;
-            }}
-            table {{
-                border-collapse: collapse;
-                width: 100%;
-                margin-top: 20px;
-                margin-bottom: 30px;
-            }}
-            th, td {{
-                border: 1px solid #ddd;
-                padding: 8px;
-                text-align: left;
-            }}
-            th {{
-                background-color: #4CAF50;
-                color: white;
-            }}
-            .filter-controls {{
-                margin: 20px 0;
-                padding: 10px;
-                background-color: #eee;
-                border-radius: 5px;
-            }}
-            .filter-buttons {{
-                display: flex;
-                flex-wrap: wrap;
-                gap: 5px;
-                margin-bottom: 10px;
-            }}
-            .filter-buttons button {{
-                padding: 5px 10px;
-                border: 1px solid #ccc;
-                border-radius: 3px;
-                background-color: #f8f8f8;
-                cursor: pointer;
-            }}
-            .filter-buttons button:hover {{
-                background-color: #e0e0e0;
-            }}
-            .matched {{
-                background-color: #90EE90;  /* Light green */
-            }}
-            .geometric {{
-                background-color: #FFDAB9;  /* Peach */
-            }}
-            .duplicate {{
-                background-color: #E6E6FA;  /* Lavender */
-            }}
-            .parallel {{
-                background-color: #D8BFD8;  /* Thistle */
-            }}
-            .parallel-voltage {{
-                background-color: #FFE4B5;  /* Moccasin */
-            }}
-            .unmatched {{
-                background-color: #ffcccb;  /* Light red */
-            }}
-            .parameter-details {{
-                margin-left: 20px;
-                margin-bottom: 30px;
-            }}
-            .segment-table {{
-                width: 95%;
-                margin: 10px auto;
-            }}
-            .segment-table th {{
-                background-color: #5c85d6;
-            }}
-            .good-match {{
-                background-color: #c8e6c9;
-            }}
-            .moderate-match {{
-                background-color: #fff9c4;
-            }}
-            .poor-match {{
-                background-color: #ffccbc;
-            }}
-            .toggle-btn {{
-                background-color: #4CAF50;
-                color: white;
-                padding: 5px 10px;
-                border: none;
-                border-radius: 4px;
-                cursor: pointer;
-                margin-bottom: 10px;
-            }}
-            .details-section {{
-                display: none;
-            }}
-            .per-km-table {{
-                margin-top: 20px;
-                width: 95%;
-                margin-left: auto;
-                margin-right: auto;
-            }}
-            .per-km-table th {{
-                background-color: #7b68ee;
-            }}
+            body {{ font-family: Arial, sans-serif; margin: 20px; }}
+            h1, h2, h3 {{ color: #333; }}
+            .summary {{ margin-bottom: 20px; padding: 15px; background-color: #f5f5f5; border-radius: 5px; }}
+            table {{ border-collapse: collapse; width: 100%; margin-top: 20px; margin-bottom: 30px; }}
+            th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+            th {{ background-color: #4CAF50; color: white; }}
+            .filter-controls {{ margin: 20px 0; padding: 10px; background-color: #eee; border-radius: 5px; }}
+            .filter-buttons {{ display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 10px; }}
+            .filter-buttons button {{ padding: 5px 10px; border: 1px solid #ccc; border-radius: 3px; background-color: #f8f8f8; cursor: pointer; }}
+            .filter-buttons button:hover {{ background-color: #e0e0e0; }}
+            .matched {{ background-color: #90EE90; }}
+            .geometric {{ background-color: #FFDAB9; }}
+            .duplicate {{ background-color: #E6E6FA; }}
+            .parallel {{ background-color: #D8BFD8; }}
+            .parallel-voltage {{ background-color: #FFE4B5; }}
+            .unmatched {{ background-color: #ffcccb; }}
+            .parameter-details {{ margin-left: 20px; margin-bottom: 30px; }}
+            .segment-table {{ width: 95%; margin: 10px auto; }}
+            .segment-table th {{ background-color: #5c85d6; }}
+            .good-match {{ background-color: #c8e6c9; }}
+            .moderate-match {{ background-color: #fff9c4; }}
+            .poor-match {{ background-color: #ffccbc; }}
+            .toggle-btn {{ background-color: #4CAF50; color: white; padding: 5px 10px; border: none; border-radius: 4px; cursor: pointer; margin-bottom: 10px; }}
+            .details-section {{ display: none; }}
+            .per-km-table {{ margin-top: 20px; width: 95%; margin-left: auto; margin-right: auto; }}
+            .per-km-table th {{ background-color: #7b68ee; }}
+            .low-coverage {{ color: #b71c1c; font-weight: bold; }}
+            .totals-table th {{ background-color: #6a1b9a; }}
         </style>
         <script>
             function filterTable() {{
                 const filter = document.getElementById('filter').value.toLowerCase();
                 const rows = document.getElementById('resultsTable').getElementsByTagName('tr');
-
-                // Track which detail rows to show (those associated with visible main rows)
                 const visibleDetailIds = new Set();
-
-                // First pass - filter main rows and track which ones are visible
                 for (let i = 0; i < rows.length; i++) {{
                     const row = rows[i];
-
-                    // Only process main data rows (not headers or parameter detail rows)
                     if (row.classList.contains('data-row')) {{
                         const text = row.textContent.toLowerCase();
                         const rowId = row.getAttribute('data-result-id');
-
                         if (text.includes(filter)) {{
                             row.style.display = '';
                             if (rowId) visibleDetailIds.add(rowId);
@@ -4244,8 +4987,6 @@ def create_enhanced_summary_table(jao_gdf, network_gdf, matching_results):
                         }}
                     }}
                 }}
-
-                // Second pass - show/hide parameter detail rows based on main row visibility
                 for (let i = 0; i < rows.length; i++) {{
                     const row = rows[i];
                     if (row.classList.contains('parameter-row')) {{
@@ -4254,49 +4995,27 @@ def create_enhanced_summary_table(jao_gdf, network_gdf, matching_results):
                     }}
                 }}
             }}
-
             function filterByMatchStatus(status) {{
                 const rows = document.getElementById('resultsTable').getElementsByTagName('tr');
-
-                // Track which detail rows to show
                 const visibleDetailIds = new Set();
-
-                // First pass - filter main rows
                 for (let i = 0; i < rows.length; i++) {{
                     const row = rows[i];
-
                     if (row.classList.contains('data-row')) {{
                         const matchedCell = row.cells[3].textContent.trim();
                         const matchType = row.getAttribute('data-match-type');
                         const rowId = row.getAttribute('data-result-id');
-
                         let showRow = false;
-                        if (status === 'all') {{
-                            showRow = true;
-                        }} else if (status === 'matched' && matchedCell === 'Yes' && matchType === 'regular') {{
-                            showRow = true;
-                        }} else if (status === 'geometric' && matchType === 'geometric') {{
-                            showRow = true;
-                        }} else if (status === 'duplicate' && matchType === 'duplicate') {{
-                            showRow = true;
-                        }} else if (status === 'parallel' && matchType === 'parallel') {{
-                            showRow = true;
-                        }} else if (status === 'parallel-voltage' && matchType === 'parallel-voltage') {{
-                            showRow = true;
-                        }} else if (status === 'unmatched' && matchedCell === 'No') {{
-                            showRow = true;
-                        }}
-
-                        if (showRow) {{
-                            row.style.display = '';
-                            if (rowId) visibleDetailIds.add(rowId);
-                        }} else {{
-                            row.style.display = 'none';
-                        }}
+                        if (status === 'all') {{ showRow = true; }}
+                        else if (status === 'matched' && matchedCell === 'Yes' && matchType === 'regular') {{ showRow = true; }}
+                        else if (status === 'geometric' && matchType === 'geometric') {{ showRow = true; }}
+                        else if (status === 'duplicate' && matchType === 'duplicate') {{ showRow = true; }}
+                        else if (status === 'parallel' && matchType === 'parallel') {{ showRow = true; }}
+                        else if (status === 'parallel-voltage' && matchType === 'parallel-voltage') {{ showRow = true; }}
+                        else if (status === 'unmatched' && matchedCell === 'No') {{ showRow = true; }}
+                        if (showRow) {{ row.style.display = ''; if (rowId) visibleDetailIds.add(rowId); }}
+                        else {{ row.style.display = 'none'; }}
                     }}
                 }}
-
-                // Second pass - show/hide parameter rows
                 for (let i = 0; i < rows.length; i++) {{
                     const row = rows[i];
                     if (row.classList.contains('parameter-row')) {{
@@ -4305,21 +5024,14 @@ def create_enhanced_summary_table(jao_gdf, network_gdf, matching_results):
                     }}
                 }}
             }}
-
             function filterByVoltage(voltage) {{
                 const rows = document.getElementById('resultsTable').getElementsByTagName('tr');
-
-                // Track which detail rows to show
                 const visibleDetailIds = new Set();
-
-                // First pass - filter main rows
                 for (let i = 0; i < rows.length; i++) {{
                     const row = rows[i];
-
                     if (row.classList.contains('data-row')) {{
                         const voltageCell = row.cells[2].textContent.trim();
                         const rowId = row.getAttribute('data-result-id');
-
                         if (voltage === 'all' || voltageCell === voltage) {{
                             row.style.display = '';
                             if (rowId) visibleDetailIds.add(rowId);
@@ -4328,8 +5040,6 @@ def create_enhanced_summary_table(jao_gdf, network_gdf, matching_results):
                         }}
                     }}
                 }}
-
-                // Second pass - show/hide parameter rows
                 for (let i = 0; i < rows.length; i++) {{
                     const row = rows[i];
                     if (row.classList.contains('parameter-row')) {{
@@ -4338,21 +5048,14 @@ def create_enhanced_summary_table(jao_gdf, network_gdf, matching_results):
                     }}
                 }}
             }}
-
             function filterByMatchQuality(quality) {{
                 const rows = document.getElementById('resultsTable').getElementsByTagName('tr');
-
-                // Track which detail rows to show
                 const visibleDetailIds = new Set();
-
-                // First pass - filter main rows
                 for (let i = 0; i < rows.length; i++) {{
                     const row = rows[i];
-
                     if (row.classList.contains('data-row')) {{
                         const qualityCell = row.cells[7].textContent.trim();
                         const rowId = row.getAttribute('data-result-id');
-
                         if (quality === 'all' || qualityCell.includes(quality)) {{
                             row.style.display = '';
                             if (rowId) visibleDetailIds.add(rowId);
@@ -4361,8 +5064,6 @@ def create_enhanced_summary_table(jao_gdf, network_gdf, matching_results):
                         }}
                     }}
                 }}
-
-                // Second pass - show/hide parameter rows
                 for (let i = 0; i < rows.length; i++) {{
                     const row = rows[i];
                     if (row.classList.contains('parameter-row')) {{
@@ -4371,11 +5072,9 @@ def create_enhanced_summary_table(jao_gdf, network_gdf, matching_results):
                     }}
                 }}
             }}
-
             function toggleDetails(id) {{
                 var detailsSection = document.getElementById('details-' + id);
                 var parameterRow = document.querySelector(`.parameter-row[data-result-id="${id}"]`);
-
                 if (detailsSection.style.display === 'block') {{
                     detailsSection.style.display = 'none';
                     parameterRow.style.display = 'none';
@@ -4407,7 +5106,6 @@ def create_enhanced_summary_table(jao_gdf, network_gdf, matching_results):
             <ul>
     """
 
-    # Add match quality details
     for quality, count in match_quality_counts.items():
         if count > 0:
             percentage = count / total_jao_lines * 100
@@ -4420,7 +5118,6 @@ def create_enhanced_summary_table(jao_gdf, network_gdf, matching_results):
         <div class="filter-controls">
             <h2>Filter Results</h2>
             <input type="text" id="filter" onkeyup="filterTable()" placeholder="Search for JAO lines...">
-
             <h3>By Match Status:</h3>
             <div class="filter-buttons">
                 <button onclick="filterByMatchStatus('all')">All</button>
@@ -4431,14 +5128,12 @@ def create_enhanced_summary_table(jao_gdf, network_gdf, matching_results):
                 <button onclick="filterByMatchStatus('duplicate')">Duplicates</button>
                 <button onclick="filterByMatchStatus('unmatched')">Unmatched</button>
             </div>
-
             <h3>By Voltage Level:</h3>
             <div class="filter-buttons">
                 <button onclick="filterByVoltage('all')">All</button>
                 <button onclick="filterByVoltage('220')">220 kV</button>
                 <button onclick="filterByVoltage('400')">400 kV</button>
             </div>
-
             <h3>By Match Quality:</h3>
             <div class="filter-buttons">
                 <button onclick="filterByMatchQuality('all')">All</button>
@@ -4468,35 +5163,37 @@ def create_enhanced_summary_table(jao_gdf, network_gdf, matching_results):
             </tr>
     """
 
-    # Add rows for each result
     for i, result in enumerate(matching_results):
-        network_ids = ", ".join(result.get('network_ids', [])) if result.get('matched', False) and result.get(
-            'network_ids') else "-"
-        length_ratio = f"{result.get('length_ratio', '-'):.2f}" if result.get('length_ratio') is not None else "-"
-        jao_length_km = f"{result.get('jao_length', 0) / 1000:.2f}" if 'jao_length' in result else "-"
+        network_ids = ", ".join(result.get('network_ids', [])) if result.get('matched', False) and result.get('network_ids') else "-"
 
-        # Determine row class and match type based on match status
+        # safe length_ratio
+        lr_val = result.get('length_ratio', None)
+        length_ratio = f"{lr_val:.2f}" if isinstance(lr_val, (int, float)) else "-"
+
+        # safe JAO length cell (km)
+        if _is_num(result.get('jao_length')):
+            jao_length_km_cell = f"{float(result['jao_length'])/1000:.2f}"
+        elif _is_num(result.get('jao_length_km')):
+            jao_length_km_cell = f"{float(result['jao_length_km']):.2f}"
+        else:
+            # try fallback from gdf
+            L = _get_len_km_from_result_or_gdf(result, jao_gdf, result.get('jao_id'))
+            jao_length_km_cell = f"{L:.2f}" if _is_num(L) else "-"
+
         if result.get('matched', False):
             if result.get('is_duplicate', False):
-                css_class = "duplicate"
-                match_type = "duplicate"
+                css_class = "duplicate"; match_type = "duplicate"
             elif result.get('is_geometric_match', False):
-                css_class = "geometric"
-                match_type = "geometric"
+                css_class = "geometric"; match_type = "geometric"
             elif result.get('is_parallel_circuit', False):
-                css_class = "parallel"
-                match_type = "parallel"
+                css_class = "parallel"; match_type = "parallel"
             elif result.get('is_parallel_voltage_circuit', False):
-                css_class = "parallel-voltage"
-                match_type = "parallel-voltage"
+                css_class = "parallel-voltage"; match_type = "parallel-voltage"
             else:
-                css_class = "matched"
-                match_type = "regular"
+                css_class = "matched"; match_type = "regular"
         else:
-            css_class = "unmatched"
-            match_type = "unmatched"
+            css_class = "unmatched"; match_type = "unmatched"
 
-        # Create a unique ID for this result
         result_id = f"result-{i}"
 
         html_summary += f"""
@@ -4506,7 +5203,7 @@ def create_enhanced_summary_table(jao_gdf, network_gdf, matching_results):
                 <td>{result.get('v_nom', '-')}</td>
                 <td>{"Yes" if result.get('matched', False) else "No"}</td>
                 <td>{network_ids}</td>
-                <td>{jao_length_km}</td>
+                <td>{jao_length_km_cell}</td>
                 <td>{length_ratio}</td>
                 <td>{result.get('match_quality', '-')}</td>
                 <td>
@@ -4521,7 +5218,6 @@ def create_enhanced_summary_table(jao_gdf, network_gdf, matching_results):
             </tr>
         """
 
-        # Add detailed electrical parameters section for matched lines
         if result.get('matched', False):
             html_summary += f"""
             <tr class="parameter-row" data-result-id="{result_id}" style="display: none;">
@@ -4530,127 +5226,167 @@ def create_enhanced_summary_table(jao_gdf, network_gdf, matching_results):
                         <h3>JAO Line Electrical Parameters</h3>
             """
 
-            # Check if we have JAO electrical parameter data
-            if 'jao_r' in result:
-                jao_r = result.get('jao_r', 0)
-                jao_x = result.get('jao_x', 0)
-                jao_b = result.get('jao_b', 0)
-                jao_length_km = result.get('jao_length_km', 0)
-                jao_r_per_km = result.get('jao_r_per_km', 0)
-                jao_x_per_km = result.get('jao_x_per_km', 0)
-                jao_b_per_km = result.get('jao_b_per_km', 0)
-
+            # --- robust JAO param display (result or jao_gdf fallback) ---
+            p = _get_jao_params(result, jao_gdf)
+            if all(_is_num(p[k]) for k in ['r_total', 'x_total', 'b_total']):
+                L = p['length_km'] if _is_num(p['length_km']) else 0.0
                 html_summary += f"""
-                        <p>Length: {jao_length_km:.2f} km</p>
-                        <p>Resistance (R): {jao_r:.6f} ohm (Total)</p>
-                        <p>Reactance (X): {jao_x:.6f} ohm (Total)</p>
-                        <p>Susceptance (B): {jao_b:.8f} S (Total)</p>
-                        <p>Resistance per km (R): {jao_r_per_km:.6f} ohm/km</p>
-                        <p>Reactance per km (X): {jao_x_per_km:.6f} ohm/km</p>
-                        <p>Susceptance per km (B): {jao_b_per_km:.8f} S/km</p>
+                        <p>Length: {L:.2f} km</p>
+                        <p>Resistance (R): {p['r_total']:.6f} ohm (Total)</p>
+                        <p>Reactance (X): {p['x_total']:.6f} ohm (Total)</p>
+                        <p>Susceptance (B): {p['b_total']:.8f} S (Total)</p>
                 """
+                if all(_is_num(p[k]) for k in ['r_km','x_km','b_km']):
+                    html_summary += f"""
+                        <p>Resistance per km (R): {p['r_km']:.6f} ohm/km</p>
+                        <p>Reactance per km (X): {p['x_km']:.6f} ohm/km</p>
+                        <p>Susceptance per km (B): {p['b_km']:.8f} S/km</p>
+                    """
             else:
                 html_summary += """
                         <p>Electrical parameter data not available for this JAO line</p>
                 """
 
-            # Check if we have matched lines data
-            if 'matched_lines_data' in result and result['matched_lines_data']:
+            # Coverage (optional fields)
+            matched_km = result.get('matched_km', None)
+            coverage = result.get('coverage_ratio', None)
+            if _is_num(matched_km) and _is_num(p.get('length_km')):
+                cov = float(coverage) if _is_num(coverage) else (float(matched_km)/p['length_km'] if _is_num(p['length_km']) and p['length_km']>0 else None)
+                cov_class = "low-coverage" if (_is_num(cov) and cov < 0.9) else ""
+                if _is_num(cov):
+                    html_summary += f"""
+                        <h3>Coverage</h3>
+                        <p class="{cov_class}">Matched length: {float(matched_km):.2f} / {p['length_km']:.2f} km ({cov*100:.2f}%)</p>
+                    """
+
+            # Totals consistency
+            if result.get('jao_r') is not None and 'allocated_r_sum' in result:
+                res_r = result.get('residual_r_percent', float('inf'))
+                res_x = result.get('residual_x_percent', float('inf'))
+                res_b = result.get('residual_b_percent', float('inf'))
+                def fmt(v, digits=2):
+                    return f"{v:.{digits}f}%" if v != float('inf') else "N/A"
+                html_summary += f"""
+                        <h3>Totals Consistency (Sum Allocated vs JAO Totals)</h3>
+                        <table class="segment-table totals-table">
+                            <tr><th>Quantity</th><th>JAO Total</th><th>Sum Allocated</th><th>Residual (JAO - Alloc)</th><th>Residual %</th></tr>
+                            <tr><td>R (ohm)</td><td>{result.get('jao_r', 0):.6f}</td><td>{result.get('allocated_r_sum', 0):.6f}</td><td>{(result.get('jao_r', 0)-result.get('allocated_r_sum', 0)):.6f}</td><td>{fmt(res_r)}</td></tr>
+                            <tr><td>X (ohm)</td><td>{result.get('jao_x', 0):.6f}</td><td>{result.get('allocated_x_sum', 0):.6f}</td><td>{(result.get('jao_x', 0)-result.get('allocated_x_sum', 0)):.6f}</td><td>{fmt(res_x)}</td></tr>
+                            <tr><td>B (S)</td><td>{result.get('jao_b', 0):.8f}</td><td>{result.get('allocated_b_sum', 0):.8f}</td><td>{(result.get('jao_b', 0)-result.get('allocated_b_sum', 0)):.8f}</td><td>{fmt(res_b)}</td></tr>
+                        </table>
+                """
+
+            # Segment tables section of create_enhanced_summary_table function
+            if result.get('matched_lines_data'):
                 html_summary += """
                         <h3>Allocated Parameters for Network Segments (Total Values)</h3>
                         <table class="segment-table">
                             <tr>
-                                <th>Network ID</th>
-                                <th>Length (km)</th>
-                                <th>Length Ratio</th>
-                                <th>Allocated R (ohm)</th>
-                                <th>Original R (ohm)</th>
-                                <th>R Diff (%)</th>
-                                <th>Allocated X (ohm)</th>
-                                <th>Original X (ohm)</th>
-                                <th>X Diff (%)</th>
-                                <th>Allocated B (S)</th>
-                                <th>Original B (S)</th>
-                                <th>B Diff (%)</th>
+                                <th>Network ID</th><th>Length (km)</th><th>Circuits</th><th>Length Ratio</th>
+                                <th>Allocated R (ohm)</th><th>Original R (ohm)</th><th>R Diff (%)</th>
+                                <th>Allocated X (ohm)</th><th>Original X (ohm)</th><th>X Diff (%)</th>
+                                <th>Allocated B (S)</th><th>Original B (S)</th><th>B Diff (%)</th>
+                                <th>Allocation Status</th>
                             </tr>
                 """
+                for seg in result['matched_lines_data']:
+                    def pct(v):
+                        return f"{v:.2f}%" if v != float('inf') else "N/A"
 
-                # Add rows for each network segment
-                for segment in result['matched_lines_data']:
-                    # Determine color class based on parameter differences
-                    r_diff_class = "good-match" if abs(
-                        segment.get('r_diff_percent', float('inf'))) <= 20 else "moderate-match" if abs(
-                        segment.get('r_diff_percent', float('inf'))) <= 50 else "poor-match"
-                    x_diff_class = "good-match" if abs(
-                        segment.get('x_diff_percent', float('inf'))) <= 20 else "moderate-match" if abs(
-                        segment.get('x_diff_percent', float('inf'))) <= 50 else "poor-match"
-                    b_diff_class = "good-match" if abs(
-                        segment.get('b_diff_percent', float('inf'))) <= 20 else "moderate-match" if abs(
-                        segment.get('b_diff_percent', float('inf'))) <= 50 else "poor-match"
+                    def cls(v):
+                        return "good-match" if abs(v) <= 20 else ("moderate-match" if abs(v) <= 50 else "poor-match")
 
-                    # Format diff percentages
-                    r_diff_text = f"{segment.get('r_diff_percent', float('inf')):.2f}%" if segment.get('r_diff_percent',
-                                                                                                       float(
-                                                                                                           'inf')) != float(
-                        'inf') else "N/A"
-                    x_diff_text = f"{segment.get('x_diff_percent', float('inf')):.2f}%" if segment.get('x_diff_percent',
-                                                                                                       float(
-                                                                                                           'inf')) != float(
-                        'inf') else "N/A"
-                    b_diff_text = f"{segment.get('b_diff_percent', float('inf')):.2f}%" if segment.get('b_diff_percent',
-                                                                                                       float(
-                                                                                                           'inf')) != float(
-                        'inf') else "N/A"
+                    rdp = seg.get('r_diff_percent', float('inf'))
+                    xdp = seg.get('x_diff_percent', float('inf'))
+                    bdp = seg.get('b_diff_percent', float('inf'))
+
+                    # Get allocation status
+                    status = seg.get('allocation_status', 'Unknown')
 
                     html_summary += f"""
-                    <tr>
-                        <td>{segment.get('network_id', '-')}</td>
-                        <td>{segment.get('length_km', 0):.2f}</td>
-                        <td>{segment.get('segment_ratio', 0) * 100:.2f}%</td>
-                        <td>{segment.get('allocated_r', 0):.6f}</td>
-                        <td>{segment.get('original_r', 0):.6f}</td>
-                        <td class="{r_diff_class}">{r_diff_text}</td>
-                        <td>{segment.get('allocated_x', 0):.6f}</td>
-                        <td>{segment.get('original_x', 0):.6f}</td>
-                        <td class="{x_diff_class}">{x_diff_text}</td>
-                        <td>{segment.get('allocated_b', 0):.8f}</td>
-                        <td>{segment.get('original_b', 0):.8f}</td>
-                        <td class="{b_diff_class}">{b_diff_text}</td>
-                    </tr>
+                            <tr>
+                                <td>{seg.get('network_id', '-')}</td>
+                                <td>{seg.get('length_km', 0):.2f}</td>
+                                <td>{seg.get('num_parallel', 1)}</td>
+                                <td>{seg.get('segment_ratio', 0) * 100:.2f}%</td>
+                                <td>{seg.get('allocated_r', 0):.6f}</td>
+                                <td>{seg.get('original_r', 0):.6f}</td>
+                                <td class="{cls(rdp)}">{pct(rdp)}</td>
+                                <td>{seg.get('allocated_x', 0):.6f}</td>
+                                <td>{seg.get('original_x', 0):.6f}</td>
+                                <td class="{cls(xdp)}">{pct(xdp)}</td>
+                                <td>{seg.get('allocated_b', 0):.8f}</td>
+                                <td>{seg.get('original_b', 0):.8f}</td>
+                                <td class="{cls(bdp)}">{pct(bdp)}</td>
+                                <td>{status}</td>
+                            </tr>
                     """
-
                 html_summary += """
                         </table>
-
                         <h3>Per-Kilometer Parameters for Network Segments</h3>
                         <table class="per-km-table">
                             <tr>
-                                <th>Network ID</th>
-                                <th>Length (km)</th>
-                                <th>Allocated R (ohm/km)</th>
-                                <th>Original R (ohm/km)</th>
-                                <th>Allocated X (ohm/km)</th>
-                                <th>Original X (ohm/km)</th>
-                                <th>Allocated B (S/km)</th>
-                                <th>Original B (S/km)</th>
+                                <th>Network ID</th><th>Length (km)</th><th>Circuits</th>
+                                <th>Allocated R (ohm/km)</th><th>Original R (ohm/km)</th>
+                                <th>Allocated X (ohm/km)</th><th>Original X (ohm/km)</th>
+                                <th>Allocated B (S/km)</th><th>Original B (S/km)</th>
                             </tr>
                 """
-
-                # Add per-km values for each network segment
-                for segment in result['matched_lines_data']:
+                for seg in result['matched_lines_data']:
                     html_summary += f"""
-                    <tr>
-                        <td>{segment.get('network_id', '-')}</td>
-                        <td>{segment.get('length_km', 0):.2f}</td>
-                        <td>{segment.get('allocated_r_per_km', 0):.6f}</td>
-                        <td>{segment.get('original_r_per_km', 0):.6f}</td>
-                        <td>{segment.get('allocated_x_per_km', 0):.6f}</td>
-                        <td>{segment.get('original_x_per_km', 0):.6f}</td>
-                        <td>{segment.get('allocated_b_per_km', 0):.8f}</td>
-                        <td>{segment.get('original_b_per_km', 0):.8f}</td>
-                    </tr>
+                            <tr>
+                                <td>{seg.get('network_id', '-')}</td>
+                                <td>{seg.get('length_km', 0):.2f}</td>
+                                <td>{seg.get('num_parallel', 1)}</td>
+                                <td>{seg.get('allocated_r_per_km', 0):.6f}</td>
+                                <td>{seg.get('original_r_per_km', 0):.6f}</td>
+                                <td>{seg.get('allocated_x_per_km', 0):.6f}</td>
+                                <td>{seg.get('original_x_per_km', 0):.6f}</td>
+                                <td>{seg.get('allocated_b_per_km', 0):.8f}</td>
+                                <td>{seg.get('original_b_per_km', 0):.8f}</td>
+                            </tr>
                     """
+                # Replace the Per-Circuit Parameters Comparison section in create_enhanced_summary_table
+                # This section goes in create_enhanced_summary_table for the per-circuit comparison
+                html_summary += """
+                        <h3>Per-Circuit Parameters Comparison</h3>
+                        <table class="per-km-table">
+                            <tr>
+                                <th>Network ID</th><th>Circuits</th>
+                                <th>JAO R (ohm/km/circuit)</th><th>Network R (ohm/km/circuit)</th><th>R Diff (%)</th>
+                                <th>JAO X (ohm/km/circuit)</th><th>Network X (ohm/km/circuit)</th><th>X Diff (%)</th>
+                                <th>JAO B (S/km/circuit)</th><th>Network B (S/km/circuit)</th><th>B Diff (%)</th>
+                            </tr>
+                """
+                for seg in result['matched_lines_data']:
+                    r_diff_pc = seg.get('r_diff_percent_pc', float('inf'))
+                    x_diff_pc = seg.get('x_diff_percent_pc', float('inf'))
+                    b_diff_pc = seg.get('b_diff_percent_pc', float('inf'))
 
+                    # Make sure we use the correct values
+                    jao_r_pc = seg.get('jao_r_per_km_pc', 0)
+                    jao_x_pc = seg.get('jao_x_per_km_pc', 0)
+                    jao_b_pc = seg.get('jao_b_per_km_pc', 0)
+
+                    orig_r_pc = seg.get('original_r_per_km_pc', 0)
+                    orig_x_pc = seg.get('original_x_per_km_pc', 0)
+                    orig_b_pc = seg.get('original_b_per_km_pc', 0)
+
+                    html_summary += f"""
+                            <tr>
+                                <td>{seg.get('network_id', '-')}</td>
+                                <td>{seg.get('num_parallel', 1)}</td>
+                                <td>{jao_r_pc:.6f}</td>
+                                <td>{orig_r_pc:.6f}</td>
+                                <td class="{cls(r_diff_pc)}">{pct(r_diff_pc)}</td>
+                                <td>{jao_x_pc:.6f}</td>
+                                <td>{orig_x_pc:.6f}</td>
+                                <td class="{cls(x_diff_pc)}">{pct(x_diff_pc)}</td>
+                                <td>{jao_b_pc:.8f}</td>
+                                <td>{orig_b_pc:.8f}</td>
+                                <td class="{cls(b_diff_pc)}">{pct(b_diff_pc)}</td>
+                            </tr>
+                    """
                 html_summary += """
                         </table>
                 """
@@ -4672,13 +5408,13 @@ def create_enhanced_summary_table(jao_gdf, network_gdf, matching_results):
     """
 
     # Save the HTML file
-    output_dir = Path("output")
-    output_dir.mkdir(exist_ok=True)
+    output_dir = Path("output"); output_dir.mkdir(exist_ok=True)
     output_file = output_dir / 'jao_network_matching_parameters.html'
-    with open(output_file, 'w') as f:
+    with open(output_file, 'w', encoding='utf-8') as f:
         f.write(html_summary)
-
     return output_file
+
+
 
 
 def visualize_results(jao_gdf, network_gdf, matching_results):
@@ -7724,77 +8460,270 @@ def match_network_lines_by_geometry_hash(matching_results, network_gdf, sample_d
     return matching_results
 
 
+def _to_float_or_none(v):
+    try:
+        if v is None:
+            return None
+        if isinstance(v, (int, float)):
+            return float(v)
+        # handle strings like "1.23", "1,23", "  1.23 "
+        s = str(v).strip().replace(",", ".")
+        return float(s)
+    except Exception:
+        return None
+
+def normalize_and_fill_params(matching_results, jao_gdf, network_gdf):
+    """
+    Make sure each matched result has:
+      - jao_length_km (float)
+      - jao_r, jao_x, jao_b (totals)
+      - jao_r_per_km, jao_x_per_km, jao_b_per_km
+      - matched_km, coverage_ratio
+    Pull from allocate output, else from jao_gdf; compute consistently.
+    """
+
+    # Build quick lookups from JAO dataframe
+    # Expect: 'id' (str/int), 'length' (km), and either totals (r,x,b) or per-km (R_per_km, X_per_km, B_per_km)
+    jao_len_km = {}
+    jao_totals = {}     # id -> (r,x,b)
+    jao_per_km = {}     # id -> (r_per_km,x_per_km,b_per_km)
+
+    id_col = 'id'
+    len_col = 'length'  # in km (you printed "Using 'length' column for JAO ...: 51.511 km")
+    tot_cols = ['r', 'x', 'b']  # totals (ohm, ohm, S)
+    perkm_cols = ['R_per_km', 'X_per_km', 'B_per_km']  # optional
+
+    for _, row in jao_gdf.iterrows():
+        jid = str(row.get(id_col))
+        if not jid or jid == 'None':
+            continue
+
+        Lkm = _to_float_or_none(row.get(len_col))
+        if Lkm is not None:
+            jao_len_km[jid] = Lkm
+
+        Rtot = _to_float_or_none(row.get(tot_cols[0]))
+        Xtot = _to_float_or_none(row.get(tot_cols[1]))
+        Btot = _to_float_or_none(row.get(tot_cols[2]))
+        if any(v is not None for v in (Rtot, Xtot, Btot)):
+            jao_totals[jid] = (Rtot, Xtot, Btot)
+
+        Rpk = _to_float_or_none(row.get(perkm_cols[0]))
+        Xpk = _to_float_or_none(row.get(perkm_cols[1]))
+        Bpk = _to_float_or_none(row.get(perkm_cols[2]))
+        if any(v is not None for v in (Rpk, Xpk, Bpk)):
+            jao_per_km[jid] = (Rpk, Xpk, Bpk)
+
+    # Optional: network lengths by id → km (best-effort fallback for coverage)
+    net_len_km = {}
+    net_id_col = 'id'
+    net_len_col_candidates = ['length_km', 'length']  # choose the one you have (km)
+    # Pick the first that exists
+    for cand in net_len_col_candidates:
+        if cand in network_gdf.columns:
+            net_len_col = cand
+            break
+    else:
+        net_len_col = None
+
+    if net_len_col:
+        for _, row in network_gdf.iterrows():
+            nid = str(row.get(net_id_col))
+            L = _to_float_or_none(row.get(net_len_col))
+            if nid and L is not None:
+                net_len_km[nid] = L
+
+    # Normalize each result
+    for r in matching_results:
+        if not r.get('matched'):
+            # Still normalize length so UI shows consistent numbers
+            jid = str(r.get('jao_id'))
+            if jid in jao_len_km:
+                r['jao_length_km'] = jao_len_km[jid]
+            continue
+
+        jid = str(r.get('jao_id'))
+
+        # ---- Length: authoritative from JAO DF ----
+        Lkm = jao_len_km.get(jid)
+        if Lkm is None:
+            # fallback if you stored meters somewhere
+            Lm = _to_float_or_none(r.get('jao_length'))
+            if Lm is not None:
+                Lkm = Lm / 1000.0
+        r['jao_length_km'] = Lkm if Lkm is not None else _to_float_or_none(r.get('jao_length_km'))
+
+        # ---- Map legacy keys -> canonical ----
+        if r.get('jao_r') is None and r.get('jao_r_total') is not None:
+            r['jao_r'] = _to_float_or_none(r.get('jao_r_total'))
+        if r.get('jao_x') is None and r.get('jao_x_total') is not None:
+            r['jao_x'] = _to_float_or_none(r.get('jao_x_total'))
+        if r.get('jao_b') is None and r.get('jao_b_total') is not None:
+            r['jao_b'] = _to_float_or_none(r.get('jao_b_total'))
+
+        # ---- Fill missing JAO totals/per-km from JAO DF ----
+        jr = _to_float_or_none(r.get('jao_r'))
+        jx = _to_float_or_none(r.get('jao_x'))
+        jb = _to_float_or_none(r.get('jao_b'))
+
+        jrp = _to_float_or_none(r.get('jao_r_per_km'))
+        jxp = _to_float_or_none(r.get('jao_x_per_km'))
+        jbp = _to_float_or_none(r.get('jao_b_per_km'))
+
+        # If totals missing but DF has totals, use them
+        if (jr is None or jx is None or jb is None) and jid in jao_totals:
+            tt = jao_totals[jid]
+            jr = jr if jr is not None else _to_float_or_none(tt[0])
+            jx = jx if jx is not None else _to_float_or_none(tt[1])
+            jb = jb if jb is not None else _to_float_or_none(tt[2])
+
+        # If per-km missing but DF has per-km, use them
+        if (jrp is None or jxp is None or jbp is None) and jid in jao_per_km:
+            pp = jao_per_km[jid]
+            jrp = jrp if jrp is not None else _to_float_or_none(pp[0])
+            jxp = jxp if jxp is not None else _to_float_or_none(pp[1])
+            jbp = jbp if jbp is not None else _to_float_or_none(pp[2])
+
+        # If only one of totals/per-km is known, derive the other using length
+        L = r.get('jao_length_km')
+        if L and _to_float_or_none(L) not in (None, 0.0):
+            L = _to_float_or_none(L)
+            if (jr is None or jx is None or jb is None) and all(v is not None for v in (jrp, jxp, jbp)):
+                jr = jrp * L if jr is None else jr
+                jx = jxp * L if jx is None else jx
+                jb = jbp * L if jb is None else jb
+            if (jrp is None or jxp is None or jbp is None) and all(v is not None for v in (jr, jx, jb)):
+                if jrp is None: jrp = jr / L
+                if jxp is None: jxp = jx / L
+                if jbp is None: jbp = jb / L
+
+        # Commit back (only if we have numbers)
+        if jr is not None: r['jao_r'] = float(jr)
+        if jx is not None: r['jao_x'] = float(jx)
+        if jb is not None: r['jao_b'] = float(jb)
+        if jrp is not None: r['jao_r_per_km'] = float(jrp)
+        if jxp is not None: r['jao_x_per_km'] = float(jxp)
+        if jbp is not None: r['jao_b_per_km'] = float(jbp)
+
+        # ---- Coverage backfill (best-effort) ----
+        # Prefer 'matched_km' if produced by your allocator; otherwise derive from network_ids lengths
+        mk = _to_float_or_none(r.get('matched_km'))
+        if mk is None:
+            ids = r.get('network_ids') or []
+            mk = 0.0
+            for nid in ids:
+                Lseg = net_len_km.get(str(nid))
+                if Lseg is not None:
+                    mk += float(Lseg)
+            # if no network lengths, leave as None so UI can show 0.00
+        r['matched_km'] = mk if mk is not None else 0.0
+
+        L = _to_float_or_none(r.get('jao_length_km'))
+        if L and L > 0:
+            r['coverage_ratio'] = max(0.0, min(1.0, (r['matched_km'] or 0.0) / L))
+        else:
+            r['coverage_ratio'] = 0.0
+
+    return matching_results
+
+
 def main():
-    # Create output directory if it doesn't exist
+    import os
+
+    # ---------- config / output ----------
+    output_dir = "output"
     os.makedirs(output_dir, exist_ok=True)
 
-    # Load data
+    # ---------- load ----------
     print("Loading JAO lines...")
     jao_gdf = load_jao_lines()
     print(f"Loaded {len(jao_gdf)} JAO lines")
+
+    # Quick schema probe
+    print("JAO DataFrame Column Check:")
+    print(f"Columns: {jao_gdf.columns.tolist()}")
+    if len(jao_gdf) > 0:
+        first_row = jao_gdf.iloc[0]
+        for col in ['id', 'NE_name', 'r', 'x', 'b', 'length', 'jao_length_km', 'R_per_km', 'X_per_km', 'B_per_km']:
+            val = first_row.get(col, 'NOT FOUND')
+            print(f"  {col}: {val} (type: {type(val).__name__})")
 
     print("Loading network lines (excluding 110kV)...")
     network_gdf = load_network_lines()
     print(f"Loaded {len(network_gdf)} network lines")
 
-    # Identify duplicate JAO lines with identical geometries
+    def _ensure_circuits_col(df):
+        # try a bunch of common aliases
+        cand_cols = ['circuits', 'num_parallel', 'parallel_num', 'n_circuits', 'parallels', 'nparallel']
+        found = None
+        for c in cand_cols:
+            if c in df.columns:
+                found = c
+                break
+
+        if found is None:
+            # nothing found → add circuits=1
+            df['circuits'] = 1
+        else:
+            # coerce to int, fallback to 1
+            s = pd.to_numeric(df[found], errors='coerce').fillna(1).round().astype(int)
+            df['circuits'] = s
+
+        return df
+
+    print(network_gdf.loc[
+              network_gdf['id'].astype(str).isin(['Line_16621', 'Line_16622', 'Line_6481']),
+              ['id', 'num_parallel', 'circuits', 'v_nom', 'length']
+          ])
+
+    network_gdf = _ensure_circuits_col(network_gdf)
+
+    # sanity check for the problematic line
+    print(network_gdf.loc[network_gdf['id'].astype(str) == 'Line_17046', ['id', 'num_parallel', 'circuits']])
+
+    # ---------- duplicates / nearest / graph ----------
     jao_to_group, geometry_groups = identify_duplicate_jao_lines(jao_gdf)
 
-    # Use a larger distance threshold
-    distance_threshold_meters = 500  # 500 meters around substations
+    distance_threshold_meters = 500
     print("Finding nearest points for JAO endpoints...")
     nearest_points_dict = find_nearest_points(
-        jao_gdf, network_gdf,
-        max_alternatives=10,
-        distance_threshold_meters=distance_threshold_meters
+        jao_gdf, network_gdf, max_alternatives=10, distance_threshold_meters=distance_threshold_meters
     )
 
-    # Build network graph with NO automatic connections
     print("Building network graph (without extra connections)...")
     G = build_network_graph(network_gdf)
     print(f"Graph has {len(G.nodes)} nodes and {len(G.edges)} edges")
 
-    # Repair the graph to add missing connections
     G = repair_network_graph(G, network_gdf, connection_threshold_meters=50)
     print(f"Repaired graph has {len(G.nodes)} nodes and {len(G.edges)} edges")
 
-    # Find matching network lines with special handling for duplicates
+    # ---------- matching pipeline ----------
     print("Finding matching network lines with special handling for duplicates...")
     matching_results = find_matching_network_lines_with_duplicates(
         jao_gdf, network_gdf, nearest_points_dict, G,
-        duplicate_groups=geometry_groups,
-        max_reuse=3,
-        min_length_ratio=0.7,  # Network must be at least 70% of JAO length
-        max_length_ratio=3  # Network can be at most 3x JAO length
+        duplicate_groups=geometry_groups, max_reuse=3,
+        min_length_ratio=0.7, max_length_ratio=3
     )
 
-    # Add special matching for parallel circuit JAO lines with unmatched network lines
     print("Running specialized matching for parallel circuit JAO lines...")
-    matching_results = match_parallel_circuit_jao_with_network(matching_results, jao_gdf, network_gdf, G,
-                                                               nearest_points_dict)
+    matching_results = match_parallel_circuit_jao_with_network(
+        matching_results, jao_gdf, network_gdf, G, nearest_points_dict
+    )
 
-    # Double check for unmarked duplicates
     print("Double-checking duplicate handling...")
     duplicate_count_before = sum(1 for r in matching_results if r.get('is_duplicate', False))
+    matched_jaos = {r['jao_id']: r for r in matching_results if r.get('matched')}
 
-    # Create a map of already matched JAO lines
-    matched_jaos = {r['jao_id']: r for r in matching_results if r['matched']}
-
-    # Check for any duplicates that weren't properly marked
     for geom_wkt, jao_ids in geometry_groups.items():
-        if len(jao_ids) > 1:  # Only process duplicate groups
-            # Find the first matched JAO in this group
+        if len(jao_ids) > 1:
             first_matched = None
             for jao_id in jao_ids:
                 if jao_id in matched_jaos and not matched_jaos[jao_id].get('is_duplicate', False):
                     first_matched = matched_jaos[jao_id]
                     break
-
-            # If we found a matched one, ensure all others in the group are marked as duplicates
             if first_matched:
                 for jao_id in jao_ids:
                     if jao_id != first_matched['jao_id'] and jao_id in matched_jaos:
-                        # Check if this is already properly marked as duplicate
                         if not matched_jaos[jao_id].get('is_duplicate', False):
                             print(f"Fixing duplicate marking for JAO {jao_id}")
                             matched_jaos[jao_id]['is_duplicate'] = True
@@ -7804,100 +8733,119 @@ def main():
     duplicate_count_after = sum(1 for r in matching_results if r.get('is_duplicate', False))
     print(f"Fixed {duplicate_count_after - duplicate_count_before} additional duplicate markings")
 
-    # Match parallel voltage circuits
     print("Finding parallel voltage circuits...")
     matching_results = match_parallel_voltage_circuits(jao_gdf, network_gdf, matching_results)
 
-    # Ensure similar JAO lines use consistent network lines
     matching_results = improve_matches_by_similarity(matching_results, jao_gdf, network_gdf)
-
-    # Add path-based matching for parallel circuit JAOs
     matching_results = match_parallel_circuit_path_based(matching_results, jao_gdf, network_gdf, G)
 
-    # Match remaining lines using advanced geometric approach
     print("Applying advanced geometric matching for remaining lines...")
     matching_results = match_remaining_lines_by_geometry(jao_gdf, network_gdf, matching_results)
 
-    # NEW METHODS FROM CHATGPT RESPONSE:
-
-    # 1. First apply corridor-based matching (recommended as first step)
     print("Applying corridor-based matching for parallel lines...")
     matching_results = corridor_parallel_match(matching_results, jao_gdf, network_gdf)
 
-    # 2. Apply progressive relaxation matching
     print("Applying progressive relaxation matching...")
     matching_results = match_identical_network_geometries_aggressive(matching_results, jao_gdf, network_gdf)
 
-    # 3. Apply geometry hash matching
     print("Applying geometry hash matching...")
     matching_results = match_network_lines_by_geometry_hash(matching_results, network_gdf)
 
-    # Continue with remaining matching methods
-
-    # Match remaining parallel network lines
     print("Matching remaining parallel network lines...")
     matching_results = match_remaining_parallel_network_lines(matching_results, jao_gdf, network_gdf)
 
-    # Share network lines between parallel JAOs
     print("Sharing network lines between parallel JAO lines...")
     matching_results = share_network_lines_among_parallel_jaos(matching_results, jao_gdf)
 
-    # Try to convert geometric matches to path-based matches
-    matching_results = convert_geometric_to_path_matches(matching_results, G, jao_gdf, network_gdf, nearest_points_dict)
+    matching_results = convert_geometric_to_path_matches(
+        matching_results, G, jao_gdf, network_gdf, nearest_points_dict
+    )
 
-    # Debug special case for JAO 97
     print("Debugging special case for JAO 97...")
-    matching_results = debug_specific_jao_match(jao_gdf, network_gdf, matching_results,
-                                                jao_id_to_debug="97",
-                                                target_network_ids=["Line_8160", "Line_30733", "Line_30181",
-                                                                    "Line_17856"])
+    matching_results = debug_specific_jao_match(
+        jao_gdf, network_gdf, matching_results,
+        jao_id_to_debug="97",
+        target_network_ids=["Line_8160", "Line_30733", "Line_30181", "Line_17856"]
+    )
 
-    # Allocate electrical parameters
+    # ---------- electrical parameters allocation ----------
     print("Allocating electrical parameters...")
-    enhanced_results = allocate_electrical_parameters(jao_gdf, network_gdf, matching_results)
+    matching_results = allocate_electrical_parameters(jao_gdf, network_gdf, matching_results)
+    for r in matching_results:
+        if r.get('jao_id') in ['2282', '2283']:
+            print(f"POST-ALLOC {r['jao_id']}: segments={len(r.get('matched_lines_data') or [])}")
 
-    # Create enhanced visualization with duplicate handling
-    print("Creating enhanced visualization with duplicate handling...")
+    print("Normalizing fields and backfilling parameters from JAO dataframe...")
+    matching_results = normalize_and_fill_params(matching_results, jao_gdf, network_gdf)
+
+    print("Backfilling network segment tables for simple matches...")
+    matching_results = ensure_network_segment_tables(matching_results, jao_gdf, network_gdf)
+
+    # quick diagnostics (robust formatter)
+    def _sf(v, digits=6):
+        try:
+            if v is None:
+                return "—"
+            if isinstance(v, (int, float)):
+                return f"{float(v):.{digits}f}"
+            s = str(v).strip().replace(",", ".")
+            return f"{float(s):.{digits}f}"
+        except Exception:
+            return "—"
+
+    print("\nChecking electrical parameters in first 5 matched results:")
+    first5 = [r for r in matching_results if r.get('matched')][:5]
+    for r in first5:
+        jr, jx, jb = r.get('jao_r'), r.get('jao_x'), r.get('jao_b')
+        lines = r.get('matched_lines_data') or []
+        print(f"JAO {r.get('jao_id')}: "
+              f"Has R={jr is not None}, X={jx is not None}, B={jb is not None}, "
+              f"Lines data={bool(lines)}")
+        if jr is not None and jx is not None and jb is not None:
+            print(f"  R={_sf(jr, 4)}, X={_sf(jx, 4)}, B={_sf(jb, 8)}")
+        Lkm = r.get('jao_length_km')
+        print(f"  Length={_sf(Lkm, 2)} km")
+        print(f"  Network segments: {len(lines)}")
+
+    # ---------- visualizations ----------
+    print("\nCreating enhanced visualization with duplicate handling...")
     duplicate_map_file = visualize_results_with_duplicates(jao_gdf, network_gdf, matching_results)
+    try:
+        with open(duplicate_map_file, 'r', encoding='utf-8') as f:
+            html_content = f.read()
+        improved_html = improve_visualization_of_unmatched_network_lines(html_content)
+        with open(duplicate_map_file, 'w', encoding='utf-8') as f:
+            f.write(improved_html)
+    except Exception as e:
+        print("Warning: could not post-process duplicate map HTML:", e)
 
-    # Improve visualization of unmatched network lines
-    with open(duplicate_map_file, 'r') as f:
-        html_content = f.read()
-
-    improved_html = improve_visualization_of_unmatched_network_lines(html_content)
-
-    with open(duplicate_map_file, 'w') as f:
-        f.write(improved_html)
-
-    # Create regular visualization and summary
     print("Creating regular visualization and summary...")
     map_file = visualize_results(jao_gdf, network_gdf, matching_results)
+    try:
+        with open(map_file, 'r', encoding='utf-8') as f:
+            html_content = f.read()
+        improved_html = improve_visualization_of_unmatched_network_lines(html_content)
+        with open(map_file, 'w', encoding='utf-8') as f:
+            f.write(improved_html)
+    except Exception as e:
+        print("Warning: could not post-process regular map HTML:", e)
 
-    # Also improve the regular visualization
-    with open(map_file, 'r') as f:
-        html_content = f.read()
-
-    improved_html = improve_visualization_of_unmatched_network_lines(html_content)
-
-    with open(map_file, 'w') as f:
-        f.write(improved_html)
-
-    # Create summary table
+    # Build the parameters HTML once, at the end
+    print("Building enhanced HTML with parameters, coverage, and totals checks...")
     enhanced_summary_file = create_enhanced_summary_table(jao_gdf, network_gdf, matching_results)
 
-    print(f"Results saved to:")
+    print("Results saved to:")
     print(f"  - Regular Map: {map_file}")
     print(f"  - Map with Duplicate Handling: {duplicate_map_file}")
     print(f"  - Enhanced Summary with Parameters: {enhanced_summary_file}")
 
-    # Print summary statistics
+    # ---------- summary stats ----------
     total_jao_lines = len(matching_results)
-    matched_lines = sum(result['matched'] for result in matching_results)
-    duplicate_count = sum(1 for result in matching_results if result.get('is_duplicate', False))
-    parallel_count = sum(1 for result in matching_results if result.get('is_parallel_circuit', False))
-    geometric_count = sum(1 for result in matching_results if result.get('is_geometric_match', False))
-    parallel_voltage_count = sum(1 for result in matching_results if result.get('is_parallel_voltage_circuit', False))
-
+    matched_lines = sum(1 for r in matching_results if r.get('matched'))
+    duplicate_count = sum(1 for r in matching_results if r.get('is_duplicate', False))
+    parallel_count = sum(1 for r in matching_results if r.get('is_parallel_circuit', False))
+    geometric_count = sum(1 for r in matching_results if r.get('is_geometric_match', False))
+    parallel_voltage_count = sum(1 for r in matching_results if r.get('is_parallel_voltage_circuit', False))
     regular_matches = matched_lines - duplicate_count - parallel_count - geometric_count - parallel_voltage_count
 
     print(f"\nTotal JAO lines: {total_jao_lines}")
@@ -7906,55 +8854,38 @@ def main():
     print(f"  - Geometric matches: {geometric_count} ({geometric_count / total_jao_lines * 100:.1f}%)")
     print(f"  - Duplicate JAO lines: {duplicate_count} ({duplicate_count / total_jao_lines * 100:.1f}%)")
     print(f"  - Parallel circuit JAO lines: {parallel_count} ({parallel_count / total_jao_lines * 100:.1f}%)")
-    print(
-        f"  - Parallel voltage circuit JAO lines: {parallel_voltage_count} ({parallel_voltage_count / total_jao_lines * 100:.1f}%)")
-    print(
-        f"Unmatched lines: {total_jao_lines - matched_lines} ({(total_jao_lines - matched_lines) / total_jao_lines * 100:.1f}%)")
+    print(f"  - Parallel voltage circuit JAO lines: {parallel_voltage_count} ({parallel_voltage_count / total_jao_lines * 100:.1f}%)")
+    print(f"Unmatched lines: {total_jao_lines - matched_lines} ({(total_jao_lines - matched_lines) / total_jao_lines * 100:.1f}%)")
 
-    # Print statistics by voltage level
-    v220_lines = sum(1 for result in matching_results if result.get('v_nom') == 220)
-    v220_matched = sum(1 for result in matching_results if result.get('v_nom') == 220 and result['matched'])
-    v400_lines = sum(1 for result in matching_results if result.get('v_nom') == 400)
-    v400_matched = sum(1 for result in matching_results if result.get('v_nom') == 400 and result['matched'])
-
+    v220_lines = sum(1 for r in matching_results if r.get('v_nom') == 220)
+    v220_matched = sum(1 for r in matching_results if r.get('v_nom') == 220 and r.get('matched'))
+    v400_lines = sum(1 for r in matching_results if r.get('v_nom') == 400)
+    v400_matched = sum(1 for r in matching_results if r.get('v_nom') == 400 and r.get('matched'))
     print("\nStatistics by voltage level:")
-    if v220_lines > 0:
-        print(f"220 kV lines: {v220_matched}/{v220_lines} matched ({v220_matched / v220_lines * 100:.1f}%)")
-    else:
-        print("220 kV lines: 0/0 matched (0.0%)")
+    print(f"220 kV lines: {v220_matched}/{v220_lines} matched ({(v220_matched / v220_lines * 100) if v220_lines else 0.0:.1f}%)")
+    print(f"400 kV lines: {v400_matched}/{v400_lines} matched ({(v400_matched / v400_lines * 100) if v400_lines else 0.0:.1f}%)")
 
-    if v400_lines > 0:
-        print(f"400 kV lines: {v400_matched}/{v400_lines} matched ({v400_matched / v400_lines * 100:.1f}%)")
-    else:
-        print("400 kV lines: 0/0 matched (0.0%)")
-
-    # Calculate network matching statistics
     total_network_lines = len(network_gdf)
     matched_network_ids = set()
-    for result in matching_results:
-        if result['matched'] and 'network_ids' in result:
-            for network_id in result['network_ids']:
-                matched_network_ids.add(str(network_id))
-
+    for r in matching_results:
+        if r.get('matched') and r.get('network_ids'):
+            for nid in r['network_ids']:
+                matched_network_ids.add(str(nid))
     matched_network_count = len(matched_network_ids)
     unmatched_network_count = total_network_lines - matched_network_count
-
     print(f"\nNetwork Lines Statistics:")
     print(f"Total Network Lines: {total_network_lines}")
     print(f"Matched Network Lines: {matched_network_count} ({matched_network_count / total_network_lines * 100:.1f}%)")
-    print(
-        f"Unmatched Network Lines: {unmatched_network_count} ({unmatched_network_count / total_network_lines * 100:.1f}%)")
+    print(f"Unmatched Network Lines: {unmatched_network_count} ({unmatched_network_count / total_network_lines * 100:.1f}%)")
 
-    # Get count by voltage
-    n220_lines = sum(1 for _, row in network_gdf.iterrows() if row['v_nom'] == 220)
-    n220_matched = sum(
-        1 for _, row in network_gdf.iterrows() if row['v_nom'] == 220 and str(row['id']) in matched_network_ids)
-    n400_lines = sum(1 for _, row in network_gdf.iterrows() if row['v_nom'] in [380, 400])
-    n400_matched = sum(
-        1 for _, row in network_gdf.iterrows() if row['v_nom'] in [380, 400] and str(row['id']) in matched_network_ids)
+    n220_lines = sum(1 for _, row in network_gdf.iterrows() if row.get('v_nom') == 220)
+    n220_matched = sum(1 for _, row in network_gdf.iterrows() if row.get('v_nom') == 220 and str(row.get('id')) in matched_network_ids)
+    n400_lines = sum(1 for _, row in network_gdf.iterrows() if row.get('v_nom') in [380, 400])
+    n400_matched = sum(1 for _, row in network_gdf.iterrows() if row.get('v_nom') in [380, 400] and str(row.get('id')) in matched_network_ids)
+    print(f"220 kV network lines: {n220_matched}/{n220_lines} matched ({(n220_matched / n220_lines * 100) if n220_lines else 0.0:.1f}%)")
+    print(f"400 kV network lines: {n400_matched}/{n400_lines} matched ({(n400_matched / n400_lines * 100) if n400_lines else 0.0:.1f}%)")
 
-    print(f"220 kV network lines: {n220_matched}/{n220_lines} matched ({n220_matched / n220_lines * 100:.1f}%)")
-    print(f"400 kV network lines: {n400_matched}/{n400_lines} matched ({n400_matched / n400_lines * 100:.1f}%)")
+
 
 
 if __name__ == "__main__":
