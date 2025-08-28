@@ -2773,7 +2773,7 @@ def find_matching_network_lines_with_duplicates(
         G,
         duplicate_groups,
         *,
-        max_reuse: int = 3,
+        max_reuse: int = 1,
         max_paths_to_try: int = 20,
         min_length_ratio: float = 0.7,
         max_length_ratio: float = 1.5,
@@ -4591,6 +4591,756 @@ def match_pypsa_to_network(pypsa_gdf, network_gdf, G=None):
     print(f"\nPyPSA matching results: {matched_count}/{total_pypsa} lines matched ({match_percentage:.1f}%)")
 
     return pypsa_network_matches
+
+
+### global matchin approach
+def prune_excessive_matches(matching_results, jao_gdf, network_gdf, max_ratio=2.5):
+    """
+    Remove network segments that cause excessive length ratios or don't follow the JAO corridor.
+    This focuses on maintaining the best segment when multiple are matched.
+    """
+    print("Pruning excessive network line matches...")
+    pruned_count = 0
+
+    for result in matching_results:
+        if not result.get('matched', False) or not result.get('network_ids', []):
+            continue
+
+        # Skip if only one network ID
+        if len(result.get('network_ids', [])) <= 1:
+            continue
+
+        jao_id = result['jao_id']
+        jao_rows = jao_gdf[jao_gdf['id'].astype(str) == jao_id]
+        if jao_rows.empty:
+            continue
+
+        jao_row = jao_rows.iloc[0]
+        jao_geom = jao_row.geometry
+        jao_length = result.get('jao_length', 0)
+
+        if jao_length <= 0:
+            continue
+
+        # Calculate current path length and ratio
+        path_length = result.get('path_length', 0)
+        current_ratio = path_length / jao_length
+
+        # Check if we need pruning
+        needs_pruning = current_ratio > max_ratio
+
+        # Even if ratio is acceptable, check if any segments are far from JAO line
+        if not needs_pruning and len(result['network_ids']) > 1:
+            # Create buffer around JAO line for corridor check
+            buffer_size = max(0.001, min(0.005, jao_length / 50000))  # Adaptive buffer
+            jao_buffer = jao_geom.buffer(buffer_size)
+
+            for network_id in result['network_ids']:
+                network_rows = network_gdf[network_gdf['id'].astype(str) == str(network_id)]
+                if network_rows.empty:
+                    continue
+
+                network_geom = network_rows.iloc[0].geometry
+
+                # Check if network line is mostly outside JAO corridor
+                if not jao_buffer.contains(network_geom) and jao_buffer.intersection(
+                        network_geom).length / network_geom.length < 0.3:
+                    needs_pruning = True
+                    break
+
+        if not needs_pruning:
+            continue
+
+        pruned_count += 1
+        print(f"  Pruning excessive match for JAO {jao_id}: length ratio {current_ratio:.2f}")
+
+        # Score each network segment
+        network_scores = []
+        for network_id in result['network_ids']:
+            network_rows = network_gdf[network_gdf['id'].astype(str) == str(network_id)]
+            if network_rows.empty:
+                continue
+
+            network_row = network_rows.iloc[0]
+            network_geom = network_row.geometry
+
+            # Calculate segment length
+            segment_length = calculate_length_meters(network_geom)
+
+            # Skip if length is 0
+            if segment_length <= 0:
+                continue
+
+            # Calculate geometric coverage
+            try:
+                coverage_jn = calculate_geometry_coverage(jao_geom, network_geom, buffer_meters=300)
+                coverage_nj = calculate_geometry_coverage(network_geom, jao_geom, buffer_meters=300)
+                coverage = (coverage_jn + coverage_nj) / 2
+            except Exception:
+                coverage = 0.0
+
+            # Calculate length ratio score (closer to 1.0 is better)
+            segment_ratio = segment_length / jao_length
+            ratio_score = max(0, 1.0 - min(abs(segment_ratio - 1.0), 1.0))
+
+            # Check if this segment is inside the JAO corridor
+            corridor_score = 0.0
+            try:
+                buffer_size = max(0.001, min(0.005, jao_length / 50000))
+                jao_buffer = jao_geom.buffer(buffer_size)
+                intersection_ratio = jao_buffer.intersection(network_geom).length / network_geom.length
+                corridor_score = min(1.0, intersection_ratio * 2)  # Scale up to reward corridor overlap
+            except Exception:
+                pass
+
+            # Combined score
+            score = coverage * 0.4 + ratio_score * 0.3 + corridor_score * 0.3
+
+            network_scores.append((network_id, score, segment_length, coverage, corridor_score))
+
+        if not network_scores:
+            continue
+
+        # Sort by score descending
+        network_scores.sort(key=lambda x: x[1], reverse=True)
+
+        # Try keeping just the best match
+        best_id = network_scores[0][0]
+        best_length = network_scores[0][2]
+        best_ratio = best_length / jao_length
+
+        # If best match alone has a good ratio, just keep it
+        if 0.5 <= best_ratio <= 2.0:
+            result['network_ids'] = [best_id]
+            result['path_length'] = best_length
+            result['length_ratio'] = best_ratio
+            print(f"    Selected single best match: {best_id}, ratio: {best_ratio:.2f}")
+            continue
+
+        # Otherwise, try to build a path that's close to the JAO length
+        kept_ids = []
+        kept_length = 0
+
+        for network_id, score, segment_length, coverage, corridor_score in network_scores:
+            # Always keep high-scoring segments
+            if score > 0.7 or coverage > 0.6 or corridor_score > 0.7:
+                kept_ids.append(network_id)
+                kept_length += segment_length
+                continue
+
+            # Check if adding this segment improves the ratio
+            new_ratio = (kept_length + segment_length) / jao_length
+
+            # Keep if it brings us closer to a good ratio
+            if kept_length == 0 or abs(new_ratio - 1.0) < abs(kept_length / jao_length - 1.0):
+                if new_ratio <= max_ratio:
+                    kept_ids.append(network_id)
+                    kept_length += segment_length
+
+            # Stop if we have a good ratio
+            if 0.7 <= new_ratio <= 1.5:
+                break
+
+        # Update the result
+        if kept_ids:
+            old_ids = result['network_ids']
+            result['network_ids'] = kept_ids
+            result['path_length'] = kept_length
+            result['length_ratio'] = kept_length / jao_length
+
+            print(
+                f"    Reduced from {len(old_ids)} to {len(kept_ids)} segments, new ratio: {result['length_ratio']:.2f}")
+            result['match_quality'] = 'Pruned Match - ' + result.get('match_quality', '')
+
+    print(f"Pruned {pruned_count} excessive matches")
+    return matching_results
+
+
+
+def global_optimized_matching(jao_gdf, network_gdf, nearest_points_dict, G):
+    """
+    Globally optimized matching between JAO and network lines using a bipartite matching approach.
+    This makes the matching process deterministic and not dependent on order.
+    """
+    import numpy as np
+    from scipy.optimize import linear_sum_assignment
+    from scipy.sparse import lil_matrix
+    import pandas as pd
+
+    print("Starting globally optimized matching...")
+
+    # Step 1: Create a comprehensive score matrix
+    # We'll create a matrix where rows are JAO lines and columns are network lines
+    n_jao = len(jao_gdf)
+    n_network = len(network_gdf)
+
+    print(f"Building score matrix for {n_jao} JAO lines and {n_network} network lines...")
+
+    # Using sparse matrix for memory efficiency
+    scores = lil_matrix((n_jao, n_network), dtype=float)
+
+    # Create mapping from IDs to indices
+    jao_id_to_idx = {str(row['id']): i for i, (_, row) in enumerate(jao_gdf.iterrows())}
+    network_id_to_idx = {str(row['id']): i for i, (_, row) in enumerate(network_gdf.iterrows())}
+
+    # Inverse mapping for result generation
+    idx_to_jao_id = {v: k for k, v in jao_id_to_idx.items()}
+    idx_to_network_id = {v: k for k, v in network_id_to_idx.items()}
+
+    # Step 2: Calculate scores for all feasible pairs
+    def calculate_pair_score(jao_row, network_row, jao_idx):
+        """Calculate a comprehensive score for a JAO-network pair."""
+        # Check voltage compatibility
+        jao_voltage = int(jao_row.get('v_nom', 0))
+        network_voltage = int(network_row.get('v_nom', 0))
+
+        # Handle 380/400 kV equivalence
+        voltage_match = False
+        if (jao_voltage == 220 and network_voltage == 220):
+            voltage_match = True
+            voltage_factor = 1.0
+        elif (jao_voltage in [380, 400] and network_voltage in [380, 400]):
+            voltage_match = True
+            voltage_factor = 1.0
+        else:
+            voltage_factor = 0.3  # Penalty for voltage mismatch
+
+        # Calculate geometric similarity
+        jao_geom = jao_row.geometry
+        network_geom = network_row.geometry
+
+        # Coverage in both directions with sensible default
+        try:
+            coverage_jn = calculate_geometry_coverage(jao_geom, network_geom, buffer_meters=500)
+            coverage_nj = calculate_geometry_coverage(network_geom, jao_geom, buffer_meters=500)
+            coverage = (coverage_jn + coverage_nj) / 2
+        except Exception:
+            coverage = 0.0
+
+        # Check length ratio
+        jao_length = calculate_length_meters(jao_geom)
+        network_length = calculate_length_meters(network_geom)
+
+        if jao_length <= 0 or network_length <= 0:
+            length_ratio_factor = 0.0
+        else:
+            ratio = network_length / jao_length
+            # Score decreases as ratio deviates from 1.0
+            if 0.5 <= ratio <= 2.0:
+                length_ratio_factor = 1.0 - min(abs(ratio - 1.0), 0.5) * 1.0
+            elif 0.3 <= ratio < 0.5 or 2.0 < ratio <= 3.0:
+                length_ratio_factor = 0.5 - min(abs(ratio - 1.0) - 0.5, 0.5) * 0.5
+            else:
+                length_ratio_factor = 0.0
+
+        # Check if endpoints are close to network nodes
+        endpoint_factor = 0.0
+        if jao_idx in nearest_points_dict:
+            np_info = nearest_points_dict[jao_idx]
+            if np_info.get('start_nearest') and np_info.get('end_nearest'):
+                # Give bonus if network line connects to either endpoint
+                network_id = str(network_row['id'])
+                endpoint_factor = 0.5  # Default boost for having endpoints
+
+                # Extra boost if this specific network line connects to endpoints
+                if 'connecting_lines' in np_info:
+                    if network_id in np_info['connecting_lines']:
+                        endpoint_factor = 1.0
+
+        # Calculate direction alignment (how parallel the lines are)
+        try:
+            from shapely.geometry import LineString
+            # Function to get unit vector from start to end
+            def get_vector(geom):
+                if geom.geom_type == 'MultiLineString':
+                    # Use the longest part
+                    geom = max(geom.geoms, key=lambda g: g.length)
+
+                coords = np.array(list(geom.coords))
+                vec = coords[-1] - coords[0]
+                norm = np.linalg.norm(vec)
+                return vec / norm if norm > 0 else vec
+
+            jao_vec = get_vector(jao_geom)
+            net_vec = get_vector(network_geom)
+            alignment = abs(np.dot(jao_vec, net_vec))
+        except Exception:
+            alignment = 0.5  # Default if calculation fails
+
+        # Combine all factors into a final score
+        # Weigh coverage and length ratio most heavily
+        score = (
+                0.35 * coverage +  # Geometric overlap
+                0.25 * length_ratio_factor +  # Length ratio appropriateness
+                0.20 * endpoint_factor +  # Endpoint connectivity
+                0.10 * alignment +  # Direction alignment
+                0.10 * voltage_factor  # Voltage compatibility
+        )
+
+        return score
+
+    # Calculate scores for all reasonable pairs (using heuristics to limit combinations)
+    evaluated_pairs = 0
+    potential_matches = 0
+
+    # First, narrow down potential matches using spatial indexing
+    from shapely.strtree import STRtree
+
+    # Build spatial index for network lines
+    network_geometries = [row.geometry for _, row in network_gdf.iterrows()]
+    tree = STRtree(network_geometries)
+
+    # For each JAO line, find potential network matches using spatial index
+    for jao_idx, (_, jao_row) in enumerate(jao_gdf.iterrows()):
+        jao_geom = jao_row.geometry
+        jao_voltage = int(jao_row.get('v_nom', 0))
+
+        # Create a buffer to find nearby network lines
+        # Buffer size depends on line length
+        buffer_size = 0.01  # ~1km in degrees
+        jao_buffer = jao_geom.buffer(buffer_size)
+
+        # Query spatial index
+        nearby_idxs = tree.query(jao_buffer)
+        if not isinstance(nearby_idxs, list):
+            nearby_idxs = list(nearby_idxs)
+
+        if not nearby_idxs:
+            continue
+
+        # For each nearby network line, calculate score if voltage compatible
+        for net_idx in nearby_idxs:
+            network_row = network_gdf.iloc[net_idx]
+            network_voltage = int(network_row.get('v_nom', 0))
+
+            # Quick voltage check before detailed calculation
+            voltage_compatible = (
+                    (jao_voltage == 220 and network_voltage == 220) or
+                    (jao_voltage in [380, 400] and network_voltage in [380, 400])
+            )
+
+            # Only evaluate if voltage is compatible or we're desperate
+            if voltage_compatible or jao_idx % 3 == 0:  # Allow some cross-voltage matches
+                score = calculate_pair_score(jao_row, network_row, jao_idx)
+                if score > 0.2:  # Only keep reasonable matches
+                    scores[jao_idx, net_idx] = score
+                    potential_matches += 1
+
+            evaluated_pairs += 1
+
+            # Progress reporting
+            if evaluated_pairs % 10000 == 0:
+                print(f"  Evaluated {evaluated_pairs} pairs, found {potential_matches} potential matches")
+
+    print(
+        f"Completed score calculation. Evaluated {evaluated_pairs} pairs, found {potential_matches} potential matches")
+
+    # Step 3: Solve the assignment problem using Hungarian algorithm
+    # Convert sparse matrix to dense for optimization (could use sparse versions for very large problems)
+    cost_matrix = -scores.toarray()  # Negate because we want to maximize score, but algorithm minimizes cost
+
+    print("Running Hungarian algorithm for optimal assignment...")
+    jao_indices, network_indices = linear_sum_assignment(cost_matrix)
+
+    # Step 4: Create results from the optimal assignment
+    matching_results = []
+
+    # Track which network lines are used
+    used_network_ids = set()
+
+    # For each assignment
+    print("Generating matching results...")
+    for jao_idx, network_idx in zip(jao_indices, network_indices):
+        # Only consider matches with positive scores
+        if scores[jao_idx, network_idx] <= 0:
+            continue
+
+        # Get the actual IDs
+        jao_id = idx_to_jao_id.get(jao_idx)
+        network_id = idx_to_network_id.get(network_idx)
+
+        if not jao_id or not network_id:
+            continue
+
+        # Get rows from dataframes
+        jao_row = jao_gdf[jao_gdf['id'].astype(str) == jao_id].iloc[0]
+        network_row = network_gdf[network_gdf['id'].astype(str) == network_id].iloc[0]
+
+        # Create match result
+        match_quality = "Globally Optimized Match"
+        match_score = float(scores[jao_idx, network_idx])
+
+        # Score quality descriptions
+        if match_score > 0.8:
+            match_quality = "Excellent Match (Global Optimization)"
+        elif match_score > 0.6:
+            match_quality = "Good Match (Global Optimization)"
+        elif match_score > 0.4:
+            match_quality = "Fair Match (Global Optimization)"
+        else:
+            match_quality = "Acceptable Match (Global Optimization)"
+
+        # Calculate lengths and ratio
+        jao_length = calculate_length_meters(jao_row.geometry)
+        network_length = calculate_length_meters(network_row.geometry)
+        length_ratio = network_length / jao_length if jao_length > 0 else 0
+
+        # Create result
+        result = {
+            'jao_id': jao_id,
+            'jao_name': str(jao_row.get('NE_name', '')),
+            'v_nom': int(jao_row['v_nom']),
+            'matched': True,
+            'match_quality': match_quality,
+            'match_score': match_score,
+            'network_ids': [network_id],
+            'jao_length': float(jao_length),
+            'path_length': float(network_length),
+            'length_ratio': float(length_ratio),
+            'globally_optimized': True
+        }
+
+        matching_results.append(result)
+        used_network_ids.add(network_id)
+
+    # Add unmatched JAO lines
+    for _, jao_row in jao_gdf.iterrows():
+        jao_id = str(jao_row['id'])
+        if jao_id not in [r.get('jao_id') for r in matching_results]:
+            # Create unmatched result
+            result = {
+                'jao_id': jao_id,
+                'jao_name': str(jao_row.get('NE_name', '')),
+                'v_nom': int(jao_row['v_nom']),
+                'matched': False,
+                'match_quality': 'Unmatched',
+                'jao_length': float(calculate_length_meters(jao_row.geometry))
+            }
+            matching_results.append(result)
+
+    # Step 5: Add parallel circuit detection
+    print("Detecting parallel circuits...")
+    matching_results = detect_parallel_circuits(matching_results, jao_gdf, network_gdf, used_network_ids)
+
+    # Step 6: Iterative improvement phase
+    print("Running iterative improvement phase...")
+    matching_results = iterative_improvement(matching_results, jao_gdf, network_gdf, G, nearest_points_dict)
+
+    print("Pruning excessive matches...")
+    matching_results = prune_excessive_matches(matching_results, jao_gdf, network_gdf, max_ratio=2.5)
+
+    return matching_results
+
+
+def detect_parallel_circuits(matching_results, jao_gdf, network_gdf, used_network_ids):
+    """
+    Detect parallel circuits for matched JAO lines by looking for similar geometries
+    among network lines.
+    """
+    print("  Finding parallel circuits...")
+
+    # Map JAO IDs to their results
+    jao_to_result = {r['jao_id']: r for r in matching_results if r.get('matched', False)}
+
+    # For each matched JAO line
+    for jao_id, result in jao_to_result.items():
+        # Skip if no network IDs
+        if not result.get('network_ids'):
+            continue
+
+        # Get the primary network line for this JAO
+        primary_network_id = result['network_ids'][0]
+        primary_network_row = network_gdf[network_gdf['id'].astype(str) == primary_network_id]
+
+        if primary_network_row.empty:
+            continue
+
+        primary_geom = primary_network_row.iloc[0].geometry
+        primary_voltage = int(primary_network_row.iloc[0].get('v_nom', 0))
+
+        # Look for parallel circuits - network lines with similar geometry
+        for _, network_row in network_gdf.iterrows():
+            network_id = str(network_row['id'])
+
+            # Skip if already used or same as primary
+            if network_id in used_network_ids or network_id == primary_network_id:
+                continue
+
+            network_geom = network_row.geometry
+            network_voltage = int(network_row.get('v_nom', 0))
+
+            # Skip if voltage doesn't match
+            if not ((primary_voltage == 220 and network_voltage == 220) or
+                    (primary_voltage in [380, 400] and network_voltage in [380, 400])):
+                continue
+
+            # Calculate similarity
+            try:
+                coverage1 = calculate_geometry_coverage(primary_geom, network_geom, buffer_meters=300)
+                coverage2 = calculate_geometry_coverage(network_geom, primary_geom, buffer_meters=300)
+
+                avg_coverage = (coverage1 + coverage2) / 2
+
+                # If high overlap, consider it a parallel circuit
+                if avg_coverage > 0.75:
+                    # Add to network IDs
+                    result['network_ids'].append(network_id)
+                    used_network_ids.add(network_id)
+
+                    # Update path length
+                    network_length = calculate_length_meters(network_geom)
+                    result['path_length'] = float(result['path_length'] + network_length)
+
+                    # Update ratio
+                    if result.get('jao_length', 0) > 0:
+                        result['length_ratio'] = float(result['path_length'] / result['jao_length'])
+
+                    # Mark as parallel circuit
+                    result['is_parallel_circuit'] = True
+                    if 'Parallel' not in result.get('match_quality', ''):
+                        result['match_quality'] = 'Parallel Circuit - ' + result.get('match_quality', '')
+            except Exception as e:
+                print(f"    Error calculating coverage: {e}")
+                continue
+
+    return matching_results
+
+
+def iterative_improvement(matching_results, jao_gdf, network_gdf, G, nearest_points_dict):
+    """
+    Iteratively improve matches by:
+    1. Finding network paths between endpoint matches
+    2. Refining path-based matches
+    3. Swapping network segments if it improves overall match quality
+    """
+    import networkx as nx
+
+    print("  Improving path-based matches...")
+
+    # Map JAO IDs to their results and indices
+    jao_to_result = {r['jao_id']: r for r in matching_results if r.get('matched', False)}
+    jao_id_to_idx = {str(row['id']): i for i, (_, row) in enumerate(jao_gdf.iterrows())}
+
+    # For each matched JAO line
+    for jao_id, result in jao_to_result.items():
+        if not result.get('network_ids'):
+            continue
+
+        jao_idx = jao_id_to_idx.get(jao_id)
+        if jao_idx is None:
+            continue
+
+        # Check if we have endpoint matches
+        if jao_idx not in nearest_points_dict:
+            continue
+
+        np_info = nearest_points_dict[jao_idx]
+        if not np_info.get('start_nearest') or not np_info.get('end_nearest'):
+            continue
+
+        # Get node IDs for start and end points
+        start_idx, start_pos = np_info['start_nearest']
+        end_idx, end_pos = np_info['end_nearest']
+
+        start_node = f"node_{start_idx}_{start_pos}"
+        end_node = f"node_{end_idx}_{end_pos}"
+
+        # Try to find a path
+        try:
+            # Use the shortest path algorithm
+            path = nx.shortest_path(G, start_node, end_node, weight='weight')
+
+            # Extract network lines from the path
+            path_network_ids = []
+            for i in range(len(path) - 1):
+                edge_data = G.get_edge_data(path[i], path[i + 1])
+                if edge_data and 'id' in edge_data and not edge_data.get('connector', False):
+                    path_network_ids.append(edge_data['id'])
+
+            # Check if the path is a significant improvement
+            if path_network_ids:
+                # Calculate path length
+                path_length = 0
+                for nid in path_network_ids:
+                    network_rows = network_gdf[network_gdf['id'].astype(str) == str(nid)]
+                    if not network_rows.empty:
+                        path_length += calculate_length_meters(network_rows.iloc[0].geometry)
+
+                # Get current path length
+                current_length = result.get('path_length', 0)
+
+                # Calculate ratios
+                jao_length = result.get('jao_length', 0)
+                if jao_length > 0:
+                    current_ratio = current_length / jao_length
+                    path_ratio = path_length / jao_length
+
+                    # Replace if the new path is better (closer to 1.0)
+                    if abs(path_ratio - 1.0) < abs(current_ratio - 1.0) and 0.5 < path_ratio < 2.0:
+                        # Update result
+                        result['network_ids'] = path_network_ids
+                        result['path_length'] = float(path_length)
+                        result['length_ratio'] = float(path_ratio)
+                        result['is_path_based'] = True
+                        result['match_quality'] = 'Path-based Match (Improved)'
+        except nx.NetworkXNoPath:
+            # No path found, keep current match
+            pass
+        except Exception as e:
+            print(f"    Error in path improvement: {e}")
+
+    # Step 3: Try swapping network lines between JAO matches if it improves overall score
+    print("  Optimizing assignments by swapping network lines...")
+
+    # Get all matched JAO-network pairs
+    matched_pairs = []
+    for result in matching_results:
+        if result.get('matched') and result.get('network_ids'):
+            jao_id = result['jao_id']
+            for network_id in result['network_ids']:
+                matched_pairs.append((jao_id, network_id))
+
+    # Try swapping pairs
+    improvements = 0
+    attempts = 0
+    max_attempts = 1000  # Limit attempts to prevent excessive runtime
+
+    while attempts < max_attempts:
+        attempts += 1
+
+        # Randomly select two pairs to swap
+        if len(matched_pairs) < 2:
+            break
+
+        import random
+        idx1 = random.randint(0, len(matched_pairs) - 1)
+        idx2 = random.randint(0, len(matched_pairs) - 1)
+
+        # Make sure they're different
+        if idx1 == idx2:
+            continue
+
+        pair1 = matched_pairs[idx1]
+        pair2 = matched_pairs[idx2]
+
+        jao_id1, network_id1 = pair1
+        jao_id2, network_id2 = pair2
+
+        # Skip if same JAO
+        if jao_id1 == jao_id2:
+            continue
+
+        # Get the result objects
+        result1 = jao_to_result.get(jao_id1)
+        result2 = jao_to_result.get(jao_id2)
+
+        if not result1 or not result2:
+            continue
+
+        # Check current and swapped scores
+        # Calculate hypothetical scores after swap
+        jao_row1 = jao_gdf[jao_gdf['id'].astype(str) == jao_id1].iloc[0]
+        jao_row2 = jao_gdf[jao_gdf['id'].astype(str) == jao_id2].iloc[0]
+
+        network_row1 = network_gdf[network_gdf['id'].astype(str) == network_id1].iloc[0]
+        network_row2 = network_gdf[network_gdf['id'].astype(str) == network_id2].iloc[0]
+
+        # Calculate current scores
+        score1 = _calculate_match_score(jao_row1, network_row1)
+        score2 = _calculate_match_score(jao_row2, network_row2)
+        current_score = score1 + score2
+
+        # Calculate swapped scores
+        swapped_score1 = _calculate_match_score(jao_row1, network_row2)
+        swapped_score2 = _calculate_match_score(jao_row2, network_row1)
+        swapped_score = swapped_score1 + swapped_score2
+
+        # If swapped score is better, perform the swap
+        if swapped_score > current_score:
+            # Update network IDs
+            result1['network_ids'] = [nid for nid in result1['network_ids'] if nid != network_id1]
+            result1['network_ids'].append(network_id2)
+
+            result2['network_ids'] = [nid for nid in result2['network_ids'] if nid != network_id2]
+            result2['network_ids'].append(network_id1)
+
+            # Update matched_pairs
+            matched_pairs[idx1] = (jao_id1, network_id2)
+            matched_pairs[idx2] = (jao_id2, network_id1)
+
+            # Update path lengths and ratios
+            _update_path_length_and_ratio(result1, network_gdf)
+            _update_path_length_and_ratio(result2, network_gdf)
+
+            # Update match quality
+            if 'Optimized' not in result1.get('match_quality', ''):
+                result1['match_quality'] = 'Swap Optimized - ' + result1.get('match_quality', '')
+            if 'Optimized' not in result2.get('match_quality', ''):
+                result2['match_quality'] = 'Swap Optimized - ' + result2.get('match_quality', '')
+
+            improvements += 1
+
+    print(f"  Made {improvements} improvements through swapping")
+
+    return matching_results
+
+
+def _calculate_match_score(jao_row, network_row):
+    """Helper function to calculate match score between a JAO and network line."""
+    # Simplified score calculation for swap evaluation
+    jao_geom = jao_row.geometry
+    network_geom = network_row.geometry
+
+    jao_voltage = int(jao_row.get('v_nom', 0))
+    network_voltage = int(network_row.get('v_nom', 0))
+
+    # Voltage factor
+    voltage_factor = 1.0 if ((jao_voltage == 220 and network_voltage == 220) or
+                             (jao_voltage in [380, 400] and network_voltage in [380, 400])) else 0.3
+
+    # Calculate coverage
+    try:
+        coverage1 = calculate_geometry_coverage(jao_geom, network_geom, buffer_meters=500)
+        coverage2 = calculate_geometry_coverage(network_geom, jao_geom, buffer_meters=500)
+        coverage = (coverage1 + coverage2) / 2
+    except Exception:
+        coverage = 0.0
+
+    # Length ratio
+    jao_length = calculate_length_meters(jao_geom)
+    network_length = calculate_length_meters(network_geom)
+
+    if jao_length <= 0 or network_length <= 0:
+        length_ratio_factor = 0.0
+    else:
+        ratio = network_length / jao_length
+        # Score decreases as ratio deviates from 1.0
+        if 0.5 <= ratio <= 2.0:
+            length_ratio_factor = 1.0 - min(abs(ratio - 1.0), 0.5) * 1.0
+        elif 0.3 <= ratio < 0.5 or 2.0 < ratio <= 3.0:
+            length_ratio_factor = 0.5 - min(abs(ratio - 1.0) - 0.5, 0.5) * 0.5
+        else:
+            length_ratio_factor = 0.0
+
+    # Combined score
+    score = (0.5 * coverage + 0.3 * length_ratio_factor + 0.2 * voltage_factor)
+    return score
+
+
+def _update_path_length_and_ratio(result, network_gdf):
+    """Update path length and length ratio for a result after modification."""
+    path_length = 0
+    for network_id in result.get('network_ids', []):
+        network_rows = network_gdf[network_gdf['id'].astype(str) == str(network_id)]
+        if not network_rows.empty:
+            path_length += calculate_length_meters(network_rows.iloc[0].geometry)
+
+    result['path_length'] = float(path_length)
+
+    # Update length ratio
+    jao_length = result.get('jao_length', 0)
+    if jao_length > 0:
+        result['length_ratio'] = float(path_length / jao_length)
 
 
 def visualize_results(jao_gdf, network_gdf, matching_results, pypsa_gdf=None, output_file=None):
@@ -13551,7 +14301,7 @@ def reallocate_parameters_after_pruning(result, jao_gdf, network_gdf):
             if jao_x is not None:
                 seg['jao_x_per_km_pc'] = seg['jao_x_per_km'] * circuits if 'jao_x_per_km' in seg else None
             if jao_b is not None:
-                seg['jao_b_per_km_pc'] = seg['jao_b_per_km'] * circuits if 'jao_b_per_km' in seg else None
+                seg['jao_b_per_km_pc'] = seg['jao_b_per_km'] / circuits if 'jao_b_per_km' in seg else None
 
     # Compute sums for validation
     result['allocated_r_sum'] = sum(seg.get('allocated_r', 0) or 0 for seg in result['matched_lines_data'])
@@ -13758,6 +14508,374 @@ def create_enhanced_summary_table_with_pypsa_debug(jao_gdf, network_gdf, matchin
     return result_path
 
 
+def enforce_max_line_usage(matching_results, network_gdf, max_reuse=1):
+    """
+    Strictly enforce the maximum number of times a network line can be used.
+    If a line is used too many times, keep it only for the best matching JAO lines.
+    """
+    print("\n=== STRICTLY ENFORCING MAXIMUM LINE USAGE ===")
+
+    # Count network line usage
+    line_usage = {}
+    for result in matching_results:
+        if not result.get('matched', False) or not result.get('network_ids'):
+            continue
+
+        for network_id in result['network_ids']:
+            line_usage[network_id] = line_usage.get(network_id, 0) + 1
+
+    # Find lines that exceed max_reuse
+    overused_lines = {line_id: count for line_id, count in line_usage.items() if count > max_reuse}
+
+    if not overused_lines:
+        print(f"No network lines exceed maximum usage of {max_reuse}")
+        return matching_results
+
+    print(f"Found {len(overused_lines)} network lines that exceed maximum usage of {max_reuse}")
+
+    # For each overused line, determine which JAO lines should keep it
+    for line_id, usage_count in sorted(overused_lines.items(), key=lambda x: x[1], reverse=True):
+        print(f"Network line {line_id} is used {usage_count} times (max: {max_reuse})")
+
+        # Find all matches using this line
+        matches_using_line = []
+
+        for i, result in enumerate(matching_results):
+            if not result.get('matched', False) or not result.get('network_ids'):
+                continue
+
+            if line_id in result['network_ids']:
+                # Calculate how critical this line is to the match
+                network_ids = result['network_ids']
+                jao_length = result.get('jao_length', 0)
+
+                if jao_length <= 0 or not network_ids:
+                    continue
+
+                # Get the length of this network line
+                line_rows = network_gdf[network_gdf['id'].astype(str) == line_id]
+                if line_rows.empty:
+                    continue
+
+                line_length = calculate_length_meters(line_rows.iloc[0].geometry)
+
+                # Calculate what percentage of the match this line represents
+                match_length = result.get('path_length', 0)
+                if match_length <= 0:
+                    continue
+
+                importance = line_length / match_length
+
+                # Calculate match quality score
+                jao_id = result['jao_id']
+                score = 0
+
+                # Good length ratio is a strong indicator
+                ratio = result.get('length_ratio', 0)
+                if 0.8 <= ratio <= 1.2:
+                    score += 50
+                elif 0.6 <= ratio <= 1.4:
+                    score += 30
+                elif 0.4 <= ratio <= 1.6:
+                    score += 10
+                else:
+                    score -= 30 * (min(abs(ratio - 1.0), 5.0))
+
+                # Lower score for matches with many lines
+                score -= len(network_ids) * 5
+
+                # Bonus for single-line matches
+                if len(network_ids) == 1:
+                    score += 40
+
+                # Add additional criteria from the match quality
+                quality = result.get('match_quality', '')
+                if 'Excellent' in quality:
+                    score += 40
+                elif 'Good' in quality:
+                    score += 20
+
+                # Store all information
+                matches_using_line.append({
+                    'index': i,
+                    'jao_id': jao_id,
+                    'score': score,
+                    'importance': importance,
+                    'length_ratio': ratio,
+                    'num_lines': len(network_ids)
+                })
+
+        # If we don't need to remove any matches, continue
+        if len(matches_using_line) <= max_reuse:
+            continue
+
+        # Sort matches by score (high to low)
+        matches_using_line.sort(key=lambda x: x['score'], reverse=True)
+
+        # Keep only the top max_reuse matches
+        keep_matches = matches_using_line[:max_reuse]
+        remove_matches = matches_using_line[max_reuse:]
+
+        print(f"  Keeping line for {len(keep_matches)} JAO lines with highest scores:")
+        for match in keep_matches:
+            print(f"    JAO {match['jao_id']} (score: {match['score']:.1f}, ratio: {match['length_ratio']:.2f})")
+
+        print(f"  Removing line from {len(remove_matches)} JAO lines with lower scores:")
+        for match in remove_matches:
+            print(f"    JAO {match['jao_id']} (score: {match['score']:.1f}, ratio: {match['length_ratio']:.2f})")
+
+            # Remove the line from this match
+            result = matching_results[match['index']]
+            result['network_ids'].remove(line_id)
+
+            # If the match has no more network lines, mark it as unmatched
+            if not result['network_ids']:
+                result['matched'] = False
+                result['match_quality'] = 'Unmatched (Line Usage Limit)'
+                print(f"      JAO {match['jao_id']} is now unmatched")
+            else:
+                # Update path length and ratio
+                _update_path_length_and_ratio(result, network_gdf)
+                result['match_quality'] = 'Modified (Line Usage Limit) - ' + result.get('match_quality', '')
+                print(
+                    f"      JAO {match['jao_id']} now has {len(result['network_ids'])} lines, ratio: {result.get('length_ratio', 0):.2f}")
+
+    # Update all matches after processing
+    for result in matching_results:
+        if result.get('matched', False) and not result.get('network_ids', []):
+            result['matched'] = False
+            result['match_quality'] = 'Unmatched (No Lines)'
+
+    return matching_results
+
+
+def enforce_corridor_constraint(matching_results, jao_gdf, network_gdf, buffer_factor=0.05, min_overlap=0.5):
+    """
+    Remove network lines that don't follow the JAO corridor.
+    """
+    print("\n=== ENFORCING CORRIDOR CONSTRAINTS ===")
+
+    modified_count = 0
+
+    for result in matching_results:
+        if not result.get('matched', False) or not result.get('network_ids', []):
+            continue
+
+        jao_id = result['jao_id']
+        jao_rows = jao_gdf[jao_gdf['id'].astype(str) == jao_id]
+        if jao_rows.empty:
+            continue
+
+        jao_row = jao_rows.iloc[0]
+        jao_geom = jao_row.geometry
+        jao_length = calculate_length_meters(jao_geom)
+
+        # Create corridor buffer (adaptive to line length)
+        buffer_distance = max(0.001, jao_length * buffer_factor / 1000)  # Convert to degrees
+        jao_buffer = jao_geom.buffer(buffer_distance)
+
+        # Check each network line
+        kept_ids = []
+        removed_ids = []
+
+        for network_id in result['network_ids']:
+            network_rows = network_gdf[network_gdf['id'].astype(str) == str(network_id)]
+            if network_rows.empty:
+                continue
+
+            network_row = network_rows.iloc[0]
+            network_geom = network_row.geometry
+
+            try:
+                # Calculate overlap percentage
+                intersection = jao_buffer.intersection(network_geom)
+                overlap_ratio = intersection.length / network_geom.length
+
+                if overlap_ratio >= min_overlap:
+                    kept_ids.append(network_id)
+                else:
+                    removed_ids.append(network_id)
+                    print(f"  Removing line {network_id} from JAO {jao_id} (overlap: {overlap_ratio:.2f})")
+            except Exception as e:
+                # Keep the line if there's an error
+                kept_ids.append(network_id)
+                print(f"  Error checking overlap for {network_id}: {e}")
+
+        # Update the result if lines were removed
+        if removed_ids:
+            modified_count += 1
+            old_count = len(result['network_ids'])
+            result['network_ids'] = kept_ids
+
+            # Update match status
+            if not kept_ids:
+                result['matched'] = False
+                result['match_quality'] = 'Unmatched (Corridor Constraint)'
+                print(f"  JAO {jao_id} is now unmatched (all lines removed)")
+            else:
+                # Update path length and ratio
+                _update_path_length_and_ratio(result, network_gdf)
+                result['match_quality'] = 'Modified (Corridor) - ' + result.get('match_quality', '')
+                print(
+                    f"  JAO {jao_id}: removed {len(removed_ids)}/{old_count} lines, new ratio: {result.get('length_ratio', 0):.2f}")
+
+    print(f"Modified {modified_count} matches based on corridor constraints")
+    return matching_results
+
+
+def enforce_strict_one_to_one_matching(matching_results, jao_gdf, network_gdf):
+    """
+    Enforce strict one-to-one matching between JAO and network lines.
+    This function completely rebuilds the matching based on best scores.
+    """
+    print("\n=== ENFORCING STRICT ONE-TO-ONE MATCHING ===")
+
+    # 1. Extract all JAO-network pairs with scores
+    all_pairs = []
+
+    for result_idx, result in enumerate(matching_results):
+        if not result.get('matched', False) or not result.get('network_ids', []):
+            continue
+
+        jao_id = result['jao_id']
+        jao_rows = jao_gdf[jao_gdf['id'].astype(str) == jao_id]
+        if jao_rows.empty:
+            continue
+
+        jao_row = jao_rows.iloc[0]
+        jao_geom = jao_row.geometry
+        jao_length = result.get('jao_length', 0)
+
+        if jao_length <= 0:
+            continue
+
+        v_nom = jao_row.get('v_nom', 0)
+
+        for network_id in result['network_ids']:
+            network_rows = network_gdf[network_gdf['id'].astype(str) == str(network_id)]
+            if network_rows.empty:
+                continue
+
+            network_row = network_rows.iloc[0]
+            network_geom = network_row.geometry
+            network_length = calculate_length_meters(network_geom)
+
+            network_v_nom = network_row.get('v_nom', 0)
+
+            # Skip if lengths are very different
+            length_ratio = network_length / jao_length
+            if length_ratio < 0.2 or length_ratio > 5.0:
+                continue
+
+            # Calculate geographic overlap score
+            try:
+                # Create buffers for overlap calculation
+                buffer_size = max(0.001, jao_length / 100000)  # Adaptive buffer
+                jao_buffer = jao_geom.buffer(buffer_size)
+                network_buffer = network_geom.buffer(buffer_size)
+
+                # Calculate overlap in both directions
+                jao_to_network = jao_buffer.intersection(network_geom).length / network_geom.length
+                network_to_jao = network_buffer.intersection(jao_geom).length / jao_geom.length
+
+                overlap_score = (jao_to_network + network_to_jao) / 2
+            except Exception:
+                overlap_score = 0.0
+
+            # Calculate length ratio score (closer to 1.0 is better)
+            ratio_score = max(0, 1.0 - min(abs(length_ratio - 1.0), 1.0))
+
+            # Calculate voltage match score
+            voltage_match = 1.0 if v_nom == network_v_nom else 0.5
+
+            # Calculate total score (weighted)
+            total_score = (
+                    overlap_score * 0.5 +
+                    ratio_score * 0.3 +
+                    voltage_match * 0.2
+            )
+
+            # Add result index to track which original result this came from
+            all_pairs.append({
+                'jao_id': jao_id,
+                'network_id': network_id,
+                'score': total_score,
+                'overlap': overlap_score,
+                'ratio': length_ratio,
+                'jao_length': jao_length,
+                'network_length': network_length,
+                'voltage_match': v_nom == network_v_nom,
+                'result_idx': result_idx
+            })
+
+    if not all_pairs:
+        print("No valid JAO-network pairs found")
+        return matching_results
+
+    # 2. Sort all pairs by score (highest first)
+    all_pairs.sort(key=lambda x: x['score'], reverse=True)
+
+    # 3. Allocate network lines to JAO lines in order of score
+    allocated_network_ids = set()
+    allocated_jao_ids = set()
+    final_allocations = []
+
+    print(f"Found {len(all_pairs)} JAO-network pairs to consider")
+
+    for pair in all_pairs:
+        jao_id = pair['jao_id']
+        network_id = pair['network_id']
+
+        # Skip if this JAO or network line is already allocated
+        if jao_id in allocated_jao_ids or network_id in allocated_network_ids:
+            continue
+
+        # Allocate this pair
+        allocated_jao_ids.add(jao_id)
+        allocated_network_ids.add(network_id)
+        final_allocations.append(pair)
+
+        print(
+            f"Allocated network line {network_id} to JAO {jao_id} (score: {pair['score']:.2f}, ratio: {pair['ratio']:.2f})")
+
+    print(f"Made {len(final_allocations)} one-to-one allocations")
+
+    # 4. Create new matching results with only the allocated pairs
+    new_matching_results = []
+
+    # First, make a copy of the original unmatched results
+    for result in matching_results:
+        new_result = result.copy()
+        new_result['matched'] = False
+        new_result['network_ids'] = []
+        new_result['match_quality'] = 'Unmatched (One-to-One Constraint)'
+        new_matching_results.append(new_result)
+
+    # Then, update with the new allocations
+    for pair in final_allocations:
+        result_idx = pair['result_idx']
+        new_result = new_matching_results[result_idx]
+
+        new_result['matched'] = True
+        new_result['network_ids'] = [pair['network_id']]
+        new_result['path_length'] = pair['network_length']
+        new_result['length_ratio'] = pair['ratio']
+        new_result['match_quality'] = 'One-to-One Match'
+
+        # Add more details to match quality
+        if pair['score'] > 0.8:
+            new_result['match_quality'] = 'Excellent One-to-One Match'
+        elif pair['score'] > 0.6:
+            new_result['match_quality'] = 'Good One-to-One Match'
+        elif pair['score'] > 0.4:
+            new_result['match_quality'] = 'Fair One-to-One Match'
+
+        if pair['voltage_match']:
+            new_result['match_quality'] += ' (Voltage Match)'
+
+    return new_matching_results
+
+
 def main():
     import os
     import pandas as pd
@@ -13835,7 +14953,7 @@ def main():
 
     print("\nBuilding network graph...")
     G = build_network_graph(network_gdf)
-    G = add_station_hubs_to_graph(G, network_gdf, radius_m=350)  # <<< new
+    G = add_station_hubs_to_graph(G, network_gdf, radius_m=350)
 
     # Convert edge weights from degrees to meters (only once)
     for u, v, d in G.edges(data=True):
@@ -13856,36 +14974,207 @@ def main():
 
     print(f"Enhanced graph has {len(G.nodes)} nodes and {len(G.edges)} edges")
 
-    # ---------- MULTI-STAGE MATCHING STRATEGY ----------
-    print("\n=== STAGE 1: PRIMARY GRAPH-BASED MATCHING ===")
+    # ---------- DUAL MATCHING STRATEGY ----------
+    # First, run the global optimization approach
+    print("\n=== RUNNING GLOBALLY OPTIMIZED MATCHING ALGORITHM ===")
+    global_results = global_optimized_matching(jao_gdf, network_gdf, nearest_points_dict, G)
+
+    # Calculate match rate for global approach
+    total_jao = len(jao_gdf)
+    matched_jao_ids = set(r['jao_id'] for r in global_results if r.get('matched', False))
+    global_match_rate = len(matched_jao_ids) / total_jao
+    print(f"Global optimization match rate: {len(matched_jao_ids)}/{total_jao} ({global_match_rate:.1%})")
+
+    # Second, run the multi-stage matching approach
+    print("\n=== RUNNING MULTI-STAGE MATCHING ALGORITHM ===")
     print("Finding matching network lines with special handling for duplicates and electrical scoring...")
-    matching_results = find_matching_network_lines_with_duplicates(
+    multi_stage_results = find_matching_network_lines_with_duplicates(
         jao_gdf,
         network_gdf,
         nearest_points_dict,
         G,
         duplicate_groups=geometry_groups,
-        max_reuse=5,  # Increased from 4
-        max_paths_to_try=150,  # Increased from 100
-        min_length_ratio=0.4,  # More permissive (was 0.5)
-        max_length_ratio=5.0,  # More permissive (was 4.0)
-        corridor_km_strict=4.0,  # Increased from 3.0
-        corridor_km_relaxed=8.0,  # Increased from 7.0
-        time_budget_s=150.0  # Increased from 100.0
+        max_reuse=1,
+        max_paths_to_try=150,
+        min_length_ratio=0.4,
+        max_length_ratio=5.0,
+        corridor_km_strict=4.0,
+        corridor_km_relaxed=8.0,
+        time_budget_s=150.0
     )
 
-    # Calculate initial match rate
-    total_jao = len(jao_gdf)
+    # Calculate match rate for multi-stage approach
+    matched_jao_ids_multi = set(r['jao_id'] for r in multi_stage_results if r.get('matched', False))
+    multi_stage_match_rate = len(matched_jao_ids_multi) / total_jao
+    print(f"Multi-stage matching rate: {len(matched_jao_ids_multi)}/{total_jao} ({multi_stage_match_rate:.1%})")
+
+    # Define a function to select the best matches between two result sets
+    def select_best_matches(global_results, multi_stage_results):
+        """
+        Compare two matching result sets and select the best match for each JAO line.
+        Score is based on match quality, length ratio, and number of network lines.
+        """
+        print("\n=== SELECTING BEST MATCHES FROM BOTH APPROACHES ===")
+
+        # Create dictionaries for both result sets
+        global_by_jao = {r['jao_id']: r for r in global_results}
+        multi_by_jao = {r['jao_id']: r for r in multi_stage_results}
+
+        # Get all JAO IDs
+        all_jao_ids = set(global_by_jao.keys()) | set(multi_by_jao.keys())
+        print(f"Total unique JAO IDs across both approaches: {len(all_jao_ids)}")
+
+        # Define a scoring function to rank matches
+        def score_match(result):
+            if not result or not result.get('matched', False):
+                return -1  # Unmatched results get lowest score
+
+            # Base score
+            score = 0
+
+            # Check match quality
+            quality = result.get('match_quality', '')
+            if 'Excellent' in quality:
+                score += 100
+            elif 'Good' in quality:
+                score += 80
+            elif 'Fair' in quality:
+                score += 60
+            elif 'Acceptable' in quality:
+                score += 40
+            elif 'Path-based' in quality:
+                score += 70
+            elif 'Geometric' in quality:
+                score += 50
+            elif 'Globally Optimized' in quality:
+                score += 75  # Give global optimization a strong preference
+
+            # Check match score if available
+            if 'match_score' in result:
+                score += result['match_score'] * 100  # Scale up to be comparable
+
+            # Check length ratio - closer to 1.0 is better
+            if 'length_ratio' in result:
+                ratio = result['length_ratio']
+                if 0.8 <= ratio <= 1.2:
+                    score += 50  # Excellent ratio
+                elif 0.6 <= ratio <= 1.4:
+                    score += 30  # Good ratio
+                elif 0.4 <= ratio <= 1.6:
+                    score += 10  # Acceptable ratio
+                elif ratio > 3.0:  # Severely penalize excessive ratios
+                    score -= 100  # Strong penalty for very high ratios
+                elif ratio > 2.0:  # Penalize high ratios
+                    score -= 40  # Moderate penalty
+                else:
+                    score -= 20  # Poor ratio
+
+            # Consider number of network lines - fewer is generally better
+            if 'network_ids' in result:
+                n_lines = len(result['network_ids'])
+                if n_lines == 1:
+                    score += 30  # Single line match is preferable
+                elif n_lines <= 3:
+                    score += 20  # Few lines is good
+                elif n_lines <= 5:
+                    score += 10  # Moderate number of lines
+                else:
+                    score -= 10 * (n_lines - 5)  # Penalty for many lines
+
+            # Bonus for global optimization for tiebreaking
+            if result.get('globally_optimized', False):
+                score += 5
+
+            # Bonus for path-based matches
+            if result.get('is_path_based', False):
+                score += 15
+
+            return score
+
+        # Select best matches
+        combined_results = []
+        global_selected = 0
+        multi_selected = 0
+
+        for jao_id in all_jao_ids:
+            global_result = global_by_jao.get(jao_id)
+            multi_result = multi_by_jao.get(jao_id)
+
+            global_score = score_match(global_result)
+            multi_score = score_match(multi_result)
+
+            # Select the better match
+            if global_score > multi_score:
+                combined_results.append(global_result)
+                global_selected += 1
+                if multi_result and multi_result.get('matched', False):
+                    print(f"Selected global match for JAO {jao_id} (score: {global_score:.1f} vs {multi_score:.1f})")
+            elif multi_score > global_score:
+                combined_results.append(multi_result)
+                multi_selected += 1
+                if global_result and global_result.get('matched', False):
+                    print(
+                        f"Selected multi-stage match for JAO {jao_id} (score: {multi_score:.1f} vs {global_score:.1f})")
+            else:
+                # If scores are equal, prefer global optimization
+                if global_result:
+                    combined_results.append(global_result)
+                    global_selected += 1
+                else:
+                    combined_results.append(multi_result)
+                    multi_selected += 1
+
+        # Add any unmatched JAO lines from either approach
+        unmatched_ids = set()
+        for result in combined_results:
+            if not result.get('matched', False):
+                unmatched_ids.add(result['jao_id'])
+
+        # Make sure we have all JAO lines
+        all_jao_ids_in_df = set(str(r['id']) for _, r in jao_gdf.iterrows())
+        for jao_id in all_jao_ids_in_df:
+            if jao_id not in [r.get('jao_id') for r in combined_results]:
+                # Add unmatched entry
+                jao_row = jao_gdf[jao_gdf['id'].astype(str) == jao_id].iloc[0]
+                unmatched_result = {
+                    'jao_id': jao_id,
+                    'jao_name': str(jao_row.get('NE_name', '')),
+                    'v_nom': int(jao_row['v_nom']),
+                    'matched': False,
+                    'match_quality': 'Unmatched',
+                    'jao_length': float(calculate_length_meters(jao_row.geometry))
+                }
+                combined_results.append(unmatched_result)
+
+        print(f"Selected {global_selected} matches from global optimization")
+        print(f"Selected {multi_selected} matches from multi-stage approach")
+        print(f"Total combined results: {len(combined_results)}")
+        matched_count = sum(1 for r in combined_results if r.get('matched', False))
+        print(f"Total matched in combined results: {matched_count}/{len(jao_gdf)} ({matched_count / len(jao_gdf):.1%})")
+
+        return combined_results
+
+    # Select the best matches between the two approaches
+    matching_results = select_best_matches(global_results, multi_stage_results)
+
+    # Apply robust constraint enforcement
+    print("\nApplying robust constraints to ensure matching quality...")
+    matching_results = prune_excessive_matches(matching_results, jao_gdf, network_gdf, max_ratio=2.0)
+    matching_results = enforce_corridor_constraint(matching_results, jao_gdf, network_gdf, buffer_factor=0.05,
+                                                   min_overlap=0.4)
+    matching_results = enforce_max_line_usage(matching_results, network_gdf, max_reuse=1)
+
+    matching_results = enforce_strict_one_to_one_matching(matching_results, jao_gdf, network_gdf)
+
+
+
+
+
+    # Continue with additional matching stages for any unmatched lines
     matched_jao_ids = set(r['jao_id'] for r in matching_results if r.get('matched', False))
-    initial_match_rate = len(matched_jao_ids) / total_jao
-    print(f"Initial matching rate: {len(matched_jao_ids)}/{total_jao} ({initial_match_rate:.1%})")
-
-    print("\n=== STAGE 2: GEOMETRIC MATCHING FOR UNMATCHED LINES ===")
-    # Identify unmatched JAO lines
     unmatched_jao_ids = set(str(r['id']) for _, r in jao_gdf.iterrows()) - matched_jao_ids
-    print(f"Found {len(unmatched_jao_ids)} unmatched JAO lines to process in Stage 2")
+    print(f"After combining best matches, {len(unmatched_jao_ids)} JAO lines remain unmatched")
 
-    # After the initial graph-based matching
     print("\n=== IMPROVING PARALLEL CIRCUIT HANDLING ===")
     matching_results = match_parallel_circuits_robustly(matching_results, jao_gdf, network_gdf)
 
@@ -13900,12 +15189,12 @@ def main():
         jao_gdf,
         network_gdf,
         matching_results,
-        buffer_distance=0.008,  # Increased
-        snap_tolerance=500,  # Increased from 300
-        angle_tolerance=45,  # More permissive (was 30)
-        min_dir_cos=0.7,  # More permissive (was 0.866)
-        min_length_ratio=0.3,  # More permissive
-        max_length_ratio=3.5  # More permissive
+        buffer_distance=0.008,
+        snap_tolerance=500,
+        angle_tolerance=45,
+        min_dir_cos=0.7,
+        min_length_ratio=0.3,
+        max_length_ratio=3.5
     )
 
     # Update matched JAO IDs after geometric matching
@@ -13951,7 +15240,7 @@ def main():
         matching_results,
         jao_gdf,
         network_gdf,
-        buffer_m=1500  # Increased from 1200
+        buffer_m=1500
     )
 
     # Update matched JAO IDs
@@ -14010,7 +15299,7 @@ def main():
         nearest_points_dict
     )
 
-    # Match remaining parallel lines that might be the same
+    # Match remaining identical network geometries
     print("\nMatching remaining identical network geometries...")
     matching_results = match_identical_network_geometries_aggressive(
         matching_results,
@@ -14024,8 +15313,8 @@ def main():
         matching_results,
         jao_gdf,
         network_gdf,
-        corridor_w_220=300,  # Increased
-        corridor_w_400=400  # Increased
+        corridor_w_220=300,
+        corridor_w_400=400
     )
 
     # Share network lines among parallel JAOs when appropriate
@@ -14050,7 +15339,7 @@ def main():
 
             # Recompute path_length from the dataframe so tiny stubs don't inflate/deflate
             total_m = 0.0
-            for nid in r['network_ids']:
+            for nid in r.get('network_ids', []):
                 rows = network_gdf[network_gdf['id'].astype(str) == str(nid)]
                 if rows.empty:
                     continue
@@ -14839,22 +16128,22 @@ for dataset_name, dataset in [("JAO", jao_merged_df)] + ([("PyPSA", pypsa_merged
 
     # Export PyPSA-ready file (per-circuit totals written into r/x/b/g, columns preserved)
     pypsa_lines_csv = os.path.join(output_dir, "network_lines_pypsa.csv")
-    export_ready_lines_csv(  # Changed from export_pypsa_ready_lines_csv
+    export_ready_lines_csv(
         lines_df=network_gdf.copy(),
         export_rows=export_rows,
         out_csv_path=pypsa_lines_csv,
-        source_type="JAO",  # Added source_type parameter
+        source_type="JAO",
         use_fallback=True,
         style="corridor_like_original"
     )
 
     # Also export a version with per-circuit parameters
     pypsa_lines_per_circuit_csv = os.path.join(output_dir, "network_lines_pypsa_per_circuit.csv")
-    export_ready_lines_csv(  # Changed from export_pypsa_ready_lines_csv
+    export_ready_lines_csv(
         lines_df=network_gdf.copy(),
         export_rows=export_rows,
         out_csv_path=pypsa_lines_per_circuit_csv,
-        source_type="JAO",  # Added source_type parameter
+        source_type="JAO",
         use_fallback=True,
         style="per_circuit"
     )
@@ -14875,13 +16164,15 @@ for dataset_name, dataset in [("JAO", jao_merged_df)] + ([("PyPSA", pypsa_merged
     parallel_count = sum(1 for r in matching_results if r.get('is_parallel_circuit', False))
     geometric_count = sum(1 for r in matching_results if r.get('is_geometric_match', False))
     parallel_voltage_count = sum(1 for r in matching_results if r.get('is_parallel_voltage_circuit', False))
-    regular_matches = matched_lines - duplicate_count - parallel_count - geometric_count - parallel_voltage_count
+    global_opt_count = sum(1 for r in matching_results if r.get('globally_optimized', False))
+    regular_matches = matched_lines - duplicate_count - parallel_count - geometric_count - parallel_voltage_count - global_opt_count
 
     # Calculate final match percentages
     print(f"\n=== FINAL STATISTICS ===")
     print(f"Total JAO lines: {total_jao_lines}")
     print(f"Matched lines: {matched_lines} ({matched_lines / total_jao_lines * 100:.1f}%)")
     print(f"  - Regular matches: {regular_matches} ({regular_matches / total_jao_lines * 100:.1f}%)")
+    print(f"  - Global optimization matches: {global_opt_count} ({global_opt_count / total_jao_lines * 100:.1f}%)")
     print(f"  - Geometric matches: {geometric_count} ({geometric_count / total_jao_lines * 100:.1f}%)")
     print(f"  - Duplicate JAO lines: {duplicate_count} ({duplicate_count / total_jao_lines * 100:.1f}%)")
     print(f"  - Parallel circuit JAO lines: {parallel_count} ({parallel_count / total_jao_lines * 100:.1f}%)")
