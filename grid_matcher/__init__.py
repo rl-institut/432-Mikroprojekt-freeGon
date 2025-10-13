@@ -6,3 +6,7 @@ This package provides tools for matching transmission lines from PyPSA
 """
 
 __version__ = "1.0.0"
+
+
+def matcher():
+    return None

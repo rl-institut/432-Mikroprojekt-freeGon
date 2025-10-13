@@ -1,5 +1,4 @@
-
-def create_enhanced_summary_table(jao_gdf, pypsa_gdf, matching_results):
+def create_enhanced_summary_table(jao_gdf, pypsa_gdf, matching_results, output_dir=None):
     """
     Create an HTML table summarizing electrical parameter allocation from JAO to PyPSA.
     Safe against missing fields and unit mismatches (assumes JAO in km, PyPSA in m).
@@ -10,6 +9,14 @@ def create_enhanced_summary_table(jao_gdf, pypsa_gdf, matching_results):
     import pandas as pd
 
     print("Creating enhanced parameter summary table...")
+
+    # Use provided output_dir or default to "output"
+    if output_dir is None:
+        out_dir = Path("output")
+    else:
+        out_dir = Path(output_dir)
+
+    out_dir.mkdir(exist_ok=True)
 
     # ---- helpers ----
     def meters_to_km(val):
@@ -41,9 +48,167 @@ def create_enhanced_summary_table(jao_gdf, pypsa_gdf, matching_results):
     jao_by_id = {str(r["id"]): r for _, r in jao_gdf.iterrows()}
     pypsa_by_id = {str(r.get("line_id", r.get("id", ""))): r for _, r in pypsa_gdf.iterrows()}
 
+    # ---- IMPORTANT: Preprocess results to ensure allocation data is complete ----
+    def preprocess_results_for_visualization(results):
+        """Add electrical parameter allocation data to results if missing."""
+        processed_count = 0
+
+        for result in results:
+            if not result.get('matched', False):
+                continue
+
+            processed_count += 1
+
+            # Get JAO parameters
+            jao_id = str(result.get('jao_id', ''))
+            jao_row = jao_by_id.get(jao_id)
+
+            # Extract JAO parameters from source
+            if jao_row is not None:
+                jao_r_total = float(jao_row.get('r', 0) or 0)
+                jao_x_total = float(jao_row.get('x', 0) or 0)
+                jao_b_total = float(jao_row.get('b', 0) or 0)
+
+                if 'length' in jao_row and jao_row['length'] is not None:
+                    lv = float(jao_row['length'])
+                    jao_length_km = lv / 1000.0 if lv > 1000 else lv
+                else:
+                    jao_length_km = float(jao_row.get('length_km', 0) or 0)
+            else:
+                # Use values from the result
+                jao_r_total = float(result.get('jao_r', 0) or 0)
+                jao_x_total = float(result.get('jao_x', 0) or 0)
+                jao_b_total = float(result.get('jao_b', 0) or 0)
+                jao_length_km = float(result.get('jao_length_km', 0) or 0)
+
+            # Calculate per-km values
+            jao_r_km = jao_r_total / jao_length_km if jao_length_km > 0 else 0
+            jao_x_km = jao_x_total / jao_length_km if jao_length_km > 0 else 0
+            jao_b_km = jao_b_total / jao_length_km if jao_length_km > 0 else 0
+
+            # Store JAO parameters in result
+            result['jao_r'] = jao_r_total
+            result['jao_x'] = jao_x_total
+            result['jao_b'] = jao_b_total
+            result['jao_length_km'] = jao_length_km
+
+            # Process matched_lines_data
+            segs = result.get('matched_lines_data', [])
+
+            # If no segments, create them from pypsa_ids
+            if not segs:
+                segs = []
+                pypsa_ids = result.get('pypsa_ids', [])
+                if isinstance(pypsa_ids, str):
+                    pypsa_ids = [id.strip() for id in pypsa_ids.split(';') if id.strip()]
+
+                for pypsa_id in pypsa_ids:
+                    pypsa_id = str(pypsa_id)
+                    prow = pypsa_by_id.get(pypsa_id)
+                    if prow is not None:
+                        # Create segment entry
+                        length = float(prow.get('length', 0) or 0)
+                        # Convert to km if in meters
+                        length_km = length / 1000.0 if length > 1000 else length
+                        circuits = int(prow.get('circuits', 1) or 1)
+                        r = float(prow.get('r', 0) or 0)
+                        x = float(prow.get('x', 0) or 0)
+                        b = float(prow.get('b', 0) or 0)
+
+                        segment = {
+                            'network_id': pypsa_id,
+                            'length_km': length_km,
+                            'num_parallel': circuits,
+                            'allocation_status': 'Applied',
+                            'original_r': r,
+                            'original_x': x,
+                            'original_b': b
+                        }
+                        segs.append(segment)
+
+                result['matched_lines_data'] = segs
+
+            # Convert lengths to km if in meters
+            for seg in segs:
+                length = float(seg.get('length_km', 0) or 0)
+                if length > 1000:  # Likely in meters
+                    seg['length_km'] = length / 1000.0
+
+            # First, ensure all segments have original parameters
+            for seg in segs:
+                # Ensure original parameter values are present
+                if 'original_r' not in seg or 'original_x' not in seg or 'original_b' not in seg:
+                    pypsa_id = str(seg.get('network_id', ''))
+                    prow = pypsa_by_id.get(pypsa_id)
+                    if prow is not None:
+                        seg['original_r'] = float(prow.get('r', 0) or 0)
+                        seg['original_x'] = float(prow.get('x', 0) or 0)
+                        seg['original_b'] = float(prow.get('b', 0) or 0)
+
+            # Calculate total length for allocation
+            total_pypsa_length_km = sum(float(seg.get('length_km', 0) or 0) for seg in segs)
+
+            # Now allocate parameters based on length proportion and circuits
+            if total_pypsa_length_km > 0 and segs:
+                # Reset allocation sums for verification
+                alloc_r_sum = 0.0
+                alloc_x_sum = 0.0
+                alloc_b_sum = 0.0
+
+                for seg in segs:
+                    length_km = float(seg.get('length_km', 0) or 0)
+                    circuits = int(seg.get('num_parallel', 1) or 1)
+
+                    # Calculate length proportion
+                    length_proportion = length_km / total_pypsa_length_km
+
+                    # Calculate allocated parameters
+                    # For series elements (R, X): Divide by number of circuits (parallel paths reduce impedance)
+                    # For parallel elements (B): Multiply by number of circuits (parallel paths increase admittance)
+                    allocated_r = jao_r_total * length_proportion / circuits
+                    allocated_x = jao_x_total * length_proportion / circuits
+                    allocated_b = jao_b_total * length_proportion * circuits
+
+                    # Store allocated parameters in segment
+                    seg['allocated_r'] = allocated_r
+                    seg['allocated_x'] = allocated_x
+                    seg['allocated_b'] = allocated_b
+
+                    # Also store per-km values
+                    seg['allocated_r_per_km'] = jao_r_km / circuits
+                    seg['allocated_x_per_km'] = jao_x_km / circuits
+                    seg['allocated_b_per_km'] = jao_b_km * circuits
+
+                    # Add to allocation sums
+                    alloc_r_sum += allocated_r
+                    alloc_x_sum += allocated_x
+                    alloc_b_sum += allocated_b
+
+                # Store allocation sums in result
+                result['allocated_r_sum'] = alloc_r_sum
+                result['allocated_x_sum'] = alloc_x_sum
+                result['allocated_b_sum'] = alloc_b_sum
+
+        print(f"Preprocessed {processed_count} matched results with parameter allocation")
+        return results
+
+    # Preprocess to ensure all parameters are available
+    matching_results = preprocess_results_for_visualization(matching_results)
+
     # ---- count statistics ----
+    # Modify the line count statistics section to filter by eligible voltage levels
     total_jao = len(jao_gdf)
-    total_pypsa = len(pypsa_gdf)
+
+    # Filter PyPSA count to only include lines eligible for matching (220kV, 380kV, 400kV)
+    eligible_pypsa = 0
+    for _, row in pypsa_gdf.iterrows():
+        voltage = row.get('voltage', row.get('v_nom', 0))
+        # Only count lines that are eligible for matching (typically 220kV and 380/400kV)
+        if voltage in [220, 380, 400]:
+            eligible_pypsa += 1
+
+    # Use eligible_pypsa instead of total_pypsa for the statistics
+    total_pypsa = eligible_pypsa  # This represents lines that could be matched
 
     matched_jao = sum(1 for r in (matching_results or []) if r.get("matched", False))
 
@@ -122,7 +287,6 @@ def create_enhanced_summary_table(jao_gdf, pypsa_gdf, matching_results):
                         matched_pypsa_length_km += allocated_length
                 else:
                     # If we can't find the line in pypsa_by_id, use the segment length
-                    # but still track to avoid double counting
                     km = float(seg.get("length_km", 0) or 0.0)
                     if pid not in matched_pypsa_line_counter:
                         matched_pypsa_line_counter[pid] = 0.0
@@ -131,6 +295,26 @@ def create_enhanced_summary_table(jao_gdf, pypsa_gdf, matching_results):
                     if remaining_length > 0:
                         allocated_length = min(remaining_length, km)
                         matched_pypsa_line_counter[pid] += allocated_length
+                        matched_pypsa_length_km += allocated_length
+        else:
+            # FALLBACK: If no segment data, use pypsa_ids directly
+            pypsa_ids = result.get('pypsa_ids', [])
+            if isinstance(pypsa_ids, str):
+                pypsa_ids = [id.strip() for id in pypsa_ids.split(';') if id.strip()]
+
+            for pypsa_id in pypsa_ids:
+                pypsa_id = str(pypsa_id)
+                prow = pypsa_by_id.get(pypsa_id)
+
+                if prow is not None:
+                    km = meters_to_km(prow.get("length", None)) or 0.0
+                    circuits = int(prow.get("circuits", 1) or 1)
+
+                    # Similar logic to avoid double-counting
+                    remaining_length = km - matched_pypsa_line_counter.get(pypsa_id, 0.0)
+                    if remaining_length > 0:
+                        allocated_length = min(remaining_length, km)
+                        matched_pypsa_line_counter[pypsa_id] += allocated_length
                         matched_pypsa_length_km += allocated_length
 
     # Calculate percentages
@@ -206,9 +390,9 @@ def create_enhanced_summary_table(jao_gdf, pypsa_gdf, matching_results):
         </div>
 
         <div class="stat-row" style="margin-top: 15px;">
-          <span class="stat-label">PyPSA Lines:</span>
-          <span class="stat-value">{total_pypsa} (Matched: {matched_pypsa}, {_safe_pct(matched_pypsa, max(1, total_pypsa)):.1f}%)</span>
-        </div>
+  <span class="stat-label">PyPSA Lines:</span>
+  <span class="stat-value">{total_pypsa} (Matched: {matched_pypsa}, {_safe_pct(matched_pypsa, max(1, total_pypsa)):.1f}%)</span>
+</div>
         <div class="progress-bar-container">
           <div class="progress-bar" style="width: {_safe_pct(matched_pypsa, max(1, total_pypsa)):.1f}%"></div>
         </div>
@@ -498,7 +682,6 @@ def create_enhanced_summary_table(jao_gdf, pypsa_gdf, matching_results):
 """
 
     # write file
-    out_dir = Path("output")
     out_dir.mkdir(exist_ok=True)
     out_file = out_dir / "jao_pypsa_electrical_parameters.html"
     with open(out_file, "w", encoding="utf-8") as f:
@@ -506,7 +689,6 @@ def create_enhanced_summary_table(jao_gdf, pypsa_gdf, matching_results):
 
     print(f"Electrical parameters summary saved to {out_file}")
     return out_file
-
 
 def random_match_quality_check(matches, jao_gdf, pypsa_gdf, output_dir, sample_size=20):
     """

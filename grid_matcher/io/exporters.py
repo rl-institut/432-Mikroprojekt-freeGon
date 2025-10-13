@@ -181,7 +181,7 @@ def generate_jao_with_pypsa(matches, jao_gdf, pypsa_gdf, output_dir):
     jao_with_pypsa = pd.DataFrame(jao_data)
 
     # Save to CSV
-    jao_pypsa_file = output_dir / 'jao_with_pypsa.csv'
+    jao_pypsa_file = os.path.join(output_dir, 'jao_with_pypsa.csv')
     jao_with_pypsa.to_csv(jao_pypsa_file, index=False)
     print(f"Saved JAO with PyPSA IDs to CSV: {jao_pypsa_file}")
 

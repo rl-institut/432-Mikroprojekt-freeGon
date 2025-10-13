@@ -63,6 +63,10 @@ def setup_parser():
     match_parser.add_argument("--debug", action="store_true",
                              help="Enable debug mode with detailed logging")
 
+    # Add matcher mode option to match parser
+    match_parser.add_argument("--matcher-mode", action="store_true",
+                              help="Use the original matching algorithm with higher match rate")
+
     # Clean command parser
     clean_parser = subparsers.add_parser("clean", help="Generate a clean PyPSA CSV file")
 
@@ -119,18 +123,34 @@ def run_matching(args):
             # Combine with main pypsa_gdf for matching
             pypsa_gdf = pypsa_gdf.append(pypsa_110_gdf)
 
-    # Initialize matcher
-    matcher = GridMatcher(
-        jao_gdf,
-        pypsa_gdf,
-        endpoint_grid_m=args.endpoint_grid_m,
-        match_buffer_m=args.match_buffer_m,
-        min_coverage=args.min_coverage,
-        target_ratio=args.target_ratio
-    )
+    # Choose matching method based on mode
+    if args.matcher_mode:
+        print("Using matcher matching algorithm (original high match rate)")
+        from grid_matcher.matcher.original_matcher import run_original_matching
 
-    # Run matching
-    results = matcher.run_matching()
+        results = run_original_matching(
+            jao_gdf,
+            pypsa_gdf,
+            args.output_dir,
+            endpoint_grid_m=args.endpoint_grid_m,
+            match_buffer_m=args.match_buffer_m,
+            min_coverage=args.min_coverage,
+            target_ratio=args.target_ratio,
+            verbose=args.verbose
+        )
+    else:
+        # Use the structured GridMatcher implementation
+        matcher = GridMatcher(
+            jao_gdf,
+            pypsa_gdf,
+            endpoint_grid_m=args.endpoint_grid_m,
+            match_buffer_m=args.match_buffer_m,
+            min_coverage=args.min_coverage,
+            target_ratio=args.target_ratio
+        )
+        results = matcher.run_matching()
+
+
 
     # Create visualization
     map_file = os.path.join(args.output_dir, 'jao_pypsa_matches.html')

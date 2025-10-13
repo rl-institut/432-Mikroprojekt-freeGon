@@ -1,3 +1,203 @@
+def calculate_difference_percentage(original, allocated):
+    """
+    Calculate the percentage difference between original and allocated values.
+
+    Returns a percentage value between -100% and infinity where:
+    - 0% means identical values
+    - 100% means allocated is double the original
+    - -50% means allocated is half the original
+    """
+    if original == 0:
+        if allocated == 0:
+            return 0  # Both zero means no difference
+        else:
+            return 100  # Original is zero, allocated is non-zero
+
+    # Calculate percentage difference
+    percent_diff = ((allocated - original) / original) * 100
+
+    return percent_diff
+
+
+def prepare_visualization_data(matching_results, pypsa_gdf, jao_gdf=None, use_demo_jao_values=False):
+    """
+    Transform matching results into the format expected by the parameter comparison visualization.
+    """
+    print("Preparing visualization data...")
+
+    # Create a lookup for JAO parameters
+    jao_lookup = {}
+    if jao_gdf is not None:
+        for _, row in jao_gdf.iterrows():
+            jao_id = str(row['id'])
+            jao_lookup[jao_id] = {
+                'r': float(row.get('r', 0) or 0),
+                'x': float(row.get('x', 0) or 0),
+                'b': float(row.get('b', 0) or 0),
+                'length_km': float(row.get('length_km', row.get('length', 0)) or 0)
+            }
+        print(f"Created JAO lookup table with {len(jao_lookup)} entries")
+
+    # Create enhanced results with the expected structure
+    enhanced_results = []
+
+    # Count how many results have matched_lines_data with allocated parameters
+    has_allocation_data = 0
+    missing_allocation_data = 0
+
+    for result in matching_results:
+        if not result.get('matched', False):
+            continue
+
+        # IMPORTANT: Check if result already has matched_lines_data with allocated parameters
+        # This happens for manual matches which already have allocated parameters
+        segs = result.get('matched_lines_data', [])
+        has_all_params = all('allocated_r' in seg for seg in segs) if segs else False
+
+        if has_all_params:
+            has_allocation_data += 1
+            # Already has properly allocated parameters, use it directly
+            enhanced_result = {
+                'jao_id': result.get('jao_id', ''),
+                'matched': True,
+                'jao_r': result.get('jao_r', 0),
+                'jao_x': result.get('jao_x', 0),
+                'jao_b': result.get('jao_b', 0),
+                'jao_length_km': result.get('jao_length_km', 0),
+                'matched_lines_data': segs
+            }
+            enhanced_results.append(enhanced_result)
+            continue
+
+        missing_allocation_data += 1
+        # Standard processing for results without allocated parameters
+        # Get JAO ID and length
+        jao_id = str(result.get('jao_id', ''))
+        jao_length_km = float(result.get('jao_length_km', result.get('jao_length', 0)) or 0)
+
+        # Get JAO parameters
+        jao_r = float(result.get('jao_r', 0) or 0)
+        jao_x = float(result.get('jao_x', 0) or 0)
+        jao_b = float(result.get('jao_b', 0) or 0)
+
+        # Try lookup if parameters are missing
+        if (jao_r == 0 and jao_x == 0 and jao_b == 0) and jao_id in jao_lookup:
+            jao_data = jao_lookup[jao_id]
+            jao_r = jao_data['r']
+            jao_x = jao_data['x']
+            jao_b = jao_data['b']
+            if jao_length_km <= 0:
+                jao_length_km = jao_data['length_km']
+
+        # Get matched PyPSA IDs
+        pypsa_ids = result.get('pypsa_ids', [])
+        if not isinstance(pypsa_ids, list):
+            pypsa_ids = [pypsa_ids]
+
+        if not pypsa_ids:
+            continue
+
+        # Create matched_lines_data array expected by visualization
+        matched_lines_data = []
+        total_pypsa_r = 0
+        total_pypsa_x = 0
+        total_pypsa_b = 0
+        total_pypsa_length = 0
+
+        for pypsa_id in pypsa_ids:
+            # Find the pypsa line in the dataframe
+            matching_rows = pypsa_gdf[pypsa_gdf['id'].astype(str) == str(pypsa_id)]
+            if len(matching_rows) == 0 and 'line_id' in pypsa_gdf.columns:
+                matching_rows = pypsa_gdf[pypsa_gdf['line_id'].astype(str) == str(pypsa_id)]
+
+            if len(matching_rows) == 0:
+                continue
+
+            pypsa_row = matching_rows.iloc[0]
+
+            # Extract and convert parameters
+            try:
+                r = float(pypsa_row.get('r', 0) or 0)
+                x = float(pypsa_row.get('x', 0) or 0)
+                b = float(pypsa_row.get('b', 0) or 0)
+                length = float(pypsa_row.get('length', 0) or 0)
+                circuits = int(pypsa_row.get('circuits', 1) or 1)
+
+                total_pypsa_r += r
+                total_pypsa_x += x
+                total_pypsa_b += b
+                total_pypsa_length += length
+
+                # Create line data entry
+                matched_line = {
+                    'network_id': pypsa_id,
+                    'length_km': length,
+                    'num_parallel': circuits,
+                    'allocation_status': 'Applied',
+                    'original_r': r,
+                    'original_x': x,
+                    'original_b': b
+                }
+                matched_lines_data.append(matched_line)
+            except Exception as e:
+                print(f"Error processing PyPSA ID {pypsa_id}: {str(e)}")
+
+        # Only process if we have lines with data and valid JAO parameters
+        if matched_lines_data and (jao_r > 0 or jao_x > 0 or jao_b > 0 or use_demo_jao_values):
+            # Use demo values if needed and allowed
+            if (jao_r == 0 and jao_x == 0 and jao_b == 0) and use_demo_jao_values:
+                import random
+                variation_factor = lambda: random.uniform(0.8, 1.2)
+                jao_r = total_pypsa_r * variation_factor()
+                jao_x = total_pypsa_x * variation_factor()
+                jao_b = total_pypsa_b * variation_factor()
+
+                if jao_length_km <= 0:
+                    jao_length_km = total_pypsa_length / 1000
+
+                jao_id = f"{jao_id} (demo values)"
+
+            # Skip if still no valid parameters
+            if jao_r == 0 and jao_x == 0 and jao_b == 0:
+                continue
+
+            # Calculate per-km values
+            jao_r_per_km = jao_r / jao_length_km if jao_length_km > 0 else 0
+            jao_x_per_km = jao_x / jao_length_km if jao_length_km > 0 else 0
+            jao_b_per_km = jao_b / jao_length_km if jao_length_km > 0 else 0
+
+            # Allocate parameters to each line
+            for line in matched_lines_data:
+                circuits = line.get('num_parallel', 1)
+
+                # Store allocated parameters
+                line['allocated_r'] = jao_r
+                line['allocated_x'] = jao_x
+                line['allocated_b'] = jao_b
+
+                # Store per-km values
+                line['allocated_r_per_km'] = jao_r_per_km
+                line['allocated_x_per_km'] = jao_x_per_km
+                line['allocated_b_per_km'] = jao_b_per_km
+
+            # Create the enhanced result
+            enhanced_result = {
+                'jao_id': jao_id,
+                'matched': True,
+                'jao_r': jao_r,
+                'jao_x': jao_x,
+                'jao_b': jao_b,
+                'jao_length_km': jao_length_km,
+                'matched_lines_data': matched_lines_data
+            }
+            enhanced_results.append(enhanced_result)
+
+    print(f"Created {len(enhanced_results)} enhanced results with line data")
+    print(f"Results with pre-allocated parameters: {has_allocation_data}")
+    print(f"Results needing parameter allocation: {missing_allocation_data}")
+
+    return enhanced_results
+
 def visualize_parameter_comparison(matching_results, pypsa_gdf, output_dir="output"):
     """
     Create HTML visualization comparing original and allocated electrical parameters
@@ -12,6 +212,17 @@ def visualize_parameter_comparison(matching_results, pypsa_gdf, output_dir="outp
     from scipy.stats import pearsonr
 
     print("Creating parameter comparison visualizations...")
+
+    # Define calculation function at the beginning
+    def calc_diff_pct(a, b):
+        """
+        Calculate the percentage difference between a (allocated) and b (original).
+        """
+        if abs(b) < 1e-9:
+            return None
+
+        # Calculate as percentage change from original to allocated
+        return ((a - b) / abs(b)) * 100.0
 
     # Create output directory if it doesn't exist
     output_path = Path(output_dir)
@@ -53,47 +264,49 @@ def visualize_parameter_comparison(matching_results, pypsa_gdf, output_dir="outp
                 continue
 
             # Get segment data
-            length_km = segment.get('length_km', 0)
-            circuits = segment.get('num_parallel', 1)
+            length_km = float(segment.get('length_km', 0) or 0)
+            circuits = int(segment.get('num_parallel', 1) or 1)
 
             # Get allocated parameters from segment
-            allocated_r = float(segment.get('allocated_r', 0))
-            allocated_x = float(segment.get('allocated_x', 0))
-            allocated_b = float(segment.get('allocated_b', 0))
+            allocated_r = float(segment.get('allocated_r', 0) or 0)
+            allocated_x = float(segment.get('allocated_x', 0) or 0)
+            allocated_b = float(segment.get('allocated_b', 0) or 0)
 
             # Get original parameters directly from PyPSA dataframe
             original_r = float(pypsa_row.get('r', 0) or 0)
             original_x = float(pypsa_row.get('x', 0) or 0)
             original_b = float(pypsa_row.get('b', 0) or 0)
 
-            # Calculate PyPSA per-km values
-            original_r_per_km = original_r / length_km if length_km > 0 else 0
-            original_x_per_km = original_x / length_km if length_km > 0 else 0
-            original_b_per_km = original_b / length_km if length_km > 0 else 0
+            # Convert PyPSA length from meters to kilometers
+            length_km_converted = length_km / 1000 if length_km > 0 else 0
 
-            # Apply circuit adjustment following the correct approach from create_enhanced_summary_table
-            # For series elements (R, X): divide JAO by circuits
-            # For parallel elements (B): multiply JAO by circuits
+            # Calculate PyPSA per-km values with proper unit conversion
+            original_r_per_km = original_r / length_km_converted if length_km_converted > 0 else 0
+            original_x_per_km = original_x / length_km_converted if length_km_converted > 0 else 0
+            original_b_per_km = original_b / length_km_converted if length_km_converted > 0 else 0
+
+            # Apply circuit adjustment for per-km values
             jao_r_km_adjusted = jao_r_km / circuits
             jao_x_km_adjusted = jao_x_km / circuits
             jao_b_km_adjusted = jao_b_km * circuits
 
-            # Calculate percentage differences using circuit-adjusted values
-            def calc_diff_pct(a, b):
-                if abs(b) < 1e-9:
-                    return None
-                return 100.0 * (a - b) / abs(b)
+            # Calculate percentage differences for TOTAL values (original vs. allocated)
+            diff_r_pct = calc_diff_pct(allocated_r, original_r)
+            diff_x_pct = calc_diff_pct(allocated_x, original_x)
+            diff_b_pct = calc_diff_pct(allocated_b, original_b)
 
-            diff_r_pct = calc_diff_pct(jao_r_km_adjusted, original_r_per_km)
-            diff_x_pct = calc_diff_pct(jao_x_km_adjusted, original_x_per_km)
-            diff_b_pct = calc_diff_pct(jao_b_km_adjusted, original_b_per_km)
+            # Calculate percentage differences for PER-KM values (circuit-adjusted)
+            diff_r_pct_km = calc_diff_pct(jao_r_km_adjusted, original_r_per_km)
+            diff_x_pct_km = calc_diff_pct(jao_x_km_adjusted, original_x_per_km)
+            diff_b_pct_km = calc_diff_pct(jao_b_km_adjusted, original_b_per_km)
 
-            # Add to data
+            # Add to data (only once per segment)
             all_data.append({
                 'jao_id': jao_id,
                 'pypsa_id': pid,
                 'length_km': length_km,
                 'circuits': circuits,
+                # Total values
                 'original_r': original_r,
                 'allocated_r': allocated_r,
                 'diff_r_pct': diff_r_pct,
@@ -103,13 +316,16 @@ def visualize_parameter_comparison(matching_results, pypsa_gdf, output_dir="outp
                 'original_b': original_b,
                 'allocated_b': allocated_b,
                 'diff_b_pct': diff_b_pct,
-                # Per-km values for the new charts
+                # Per-km values
+                'original_r_per_km': original_r_per_km,
+                'original_x_per_km': original_x_per_km,
+                'original_b_per_km': original_b_per_km,
                 'jao_r_km_adjusted': jao_r_km_adjusted,
                 'jao_x_km_adjusted': jao_x_km_adjusted,
                 'jao_b_km_adjusted': jao_b_km_adjusted,
-                'original_r_per_km': original_r_per_km,
-                'original_x_per_km': original_x_per_km,
-                'original_b_per_km': original_b_per_km
+                'diff_r_pct_km': diff_r_pct_km,
+                'diff_x_pct_km': diff_x_pct_km,
+                'diff_b_pct_km': diff_b_pct_km
             })
 
     # Calculate correlation coefficients
@@ -425,38 +641,38 @@ def visualize_parameter_comparison(matching_results, pypsa_gdf, output_dir="outp
 
         // Function to get color based on actual difference percentage - MORE DISTINCT COLORS
         function getDifferenceColor(diffPct) {
-    if (diffPct === null || isNaN(diffPct)) {
-        return 'rgba(100, 100, 100, 0.8)';  // Dark gray for N/A
-    }
+            if (diffPct === null || isNaN(diffPct)) {
+                return 'rgba(100, 100, 100, 0.8)';  // Dark gray for N/A
+            }
 
-    // Clamp to a reasonable range
-    const clampedDiff = Math.max(-100, Math.min(100, diffPct));
+            // Clamp to a reasonable range
+            const clampedDiff = Math.max(-100, Math.min(100, diffPct));
 
-    // Create a continuous color gradient
-    if (clampedDiff < 0) {
-        // Blend from blue to green as we approach zero from negative side
-        const ratio = Math.min(1, Math.abs(clampedDiff) / 50);  // 50% as full intensity point
-        const r = Math.round(76 + (0 - 76) * ratio);  // Blend from green's R to blue's R
-        const g = Math.round(175 + (71 - 175) * ratio);  // Blend from green's G to blue's G
-        const b = Math.round(80 + (171 - 80) * ratio);  // Blend from green's B to blue's B
-        return `rgba(${r}, ${g}, ${b}, 0.8)`;
-    } else {
-        // Blend from green to red as we move positive
-        const ratio = Math.min(1, clampedDiff / 50);  // 50% as full intensity point
-        const r = Math.round(76 + (220 - 76) * ratio);  // Blend from green's R to red's R
-        const g = Math.round(175 + (20 - 175) * ratio);  // Blend from green's G to red's G
-        const b = Math.round(80 + (60 - 80) * ratio);  // Blend from green's B to red's B
-        return `rgba(${r}, ${g}, ${b}, 0.8)`;
-    }
-}
+            // Create a continuous color gradient
+            if (clampedDiff < 0) {
+                // Blend from blue to green as we approach zero from negative side
+                const ratio = Math.min(1, Math.abs(clampedDiff) / 50);  // 50% as full intensity point
+                const r = Math.round(76 + (0 - 76) * ratio);  // Blend from green's R to blue's R
+                const g = Math.round(175 + (71 - 175) * ratio);  // Blend from green's G to blue's G
+                const b = Math.round(80 + (171 - 80) * ratio);  // Blend from green's B to blue's B
+                return `rgba(${r}, ${g}, ${b}, 0.8)`;
+            } else {
+                // Blend from green to red as we move positive
+                const ratio = Math.min(1, clampedDiff / 50);  // 50% as full intensity point
+                const r = Math.round(76 + (220 - 76) * ratio);  // Blend from green's R to red's R
+                const g = Math.round(175 + (20 - 175) * ratio);  // Blend from green's G to red's G
+                const b = Math.round(80 + (60 - 80) * ratio);  // Blend from green's B to red's B
+                return `rgba(${r}, ${g}, ${b}, 0.8)`;
+            }
+        }
 
-        // Create scatter plots
+        // Create scatter plots for total values
         function createScatterPlot(param, canvasId) {
             const ctx = document.getElementById(canvasId).getContext('2d');
 
-            // Prepare data
+            // Prepare data - IMPORTANT: Use diff_param_pct (not diff_param_pct_km)
             const chartData = data.map(item => {
-                const diffPct = item['diff_' + param + '_pct'];
+                const diffPct = item['diff_' + param + '_pct']; // For TOTAL values
                 return {
                     x: item['original_' + param],
                     y: item['allocated_' + param],
@@ -546,13 +762,13 @@ def visualize_parameter_comparison(matching_results, pypsa_gdf, output_dir="outp
             });
         }
 
-        // Create PyPSA vs JAO comparison charts
+        // Create PyPSA vs JAO comparison charts for total values
         function createComparisonChart(param, canvasId) {
             const ctx = document.getElementById(canvasId).getContext('2d');
 
-            // Prepare data (same data but with explicit PyPSA vs JAO labeling)
+            // Prepare data - IMPORTANT: Use diff_param_pct (not diff_param_pct_km)
             const chartData = data.map(item => {
-                const diffPct = item['diff_' + param + '_pct'];
+                const diffPct = item['diff_' + param + '_pct']; // For TOTAL values
                 return {
                     x: item['original_' + param],
                     y: item['allocated_' + param],
@@ -654,9 +870,9 @@ def visualize_parameter_comparison(matching_results, pypsa_gdf, output_dir="outp
         function createPerKmChart(param, canvasId) {
             const ctx = document.getElementById(canvasId).getContext('2d');
 
-            // Prepare per-km data with circuit adjustments
+            // Prepare per-km data with circuit adjustments - IMPORTANT: Use diff_param_pct_km
             const chartData = data.map(item => {
-                const diffPct = item['diff_' + param + '_pct'];
+                const diffPct = item['diff_' + param + '_pct_km']; // For PER-KM values
                 return {
                     x: item['original_' + param + '_per_km'],
                     y: item['jao_' + param + '_km_adjusted'],
@@ -762,7 +978,7 @@ def visualize_parameter_comparison(matching_results, pypsa_gdf, output_dir="outp
             data.forEach(item => {
                 const row = document.createElement('tr');
 
-                // Add cells
+                // Add cells with TOTAL values and diff_*_pct
                 [
                     item.jao_id,
                     item.pypsa_id,
@@ -770,13 +986,13 @@ def visualize_parameter_comparison(matching_results, pypsa_gdf, output_dir="outp
                     item.circuits,
                     item.original_r.toFixed(6),
                     item.allocated_r.toFixed(6),
-                    item.diff_r_pct ? item.diff_r_pct.toFixed(2) + '%' : 'N/A',
+                    item.diff_r_pct ? (Math.abs(item.diff_r_pct) > 1000 ? (item.diff_r_pct > 0 ? '+' : '-') + '999.99%' : item.diff_r_pct.toFixed(2) + '%') : 'N/A',
                     item.original_x.toFixed(6),
                     item.allocated_x.toFixed(6),
-                    item.diff_x_pct ? item.diff_x_pct.toFixed(2) + '%' : 'N/A',
+                    item.diff_x_pct ? (Math.abs(item.diff_x_pct) > 1000 ? (item.diff_x_pct > 0 ? '+' : '-') + '999.99%' : item.diff_x_pct.toFixed(2) + '%') : 'N/A',
                     item.original_b.toExponential(6),
                     item.allocated_b.toExponential(6),
-                    item.diff_b_pct ? item.diff_b_pct.toFixed(2) + '%' : 'N/A'
+                    item.diff_b_pct ? (Math.abs(item.diff_b_pct) > 1000 ? (item.diff_b_pct > 0 ? '+' : '-') + '999.99%' : item.diff_b_pct.toFixed(2) + '%') : 'N/A'
                 ].forEach((text, index) => {
                     const td = document.createElement('td');
                     td.textContent = text;
@@ -810,7 +1026,7 @@ def visualize_parameter_comparison(matching_results, pypsa_gdf, output_dir="outp
             data.forEach(item => {
                 const row = document.createElement('tr');
 
-                // Add cells with per-km values
+                // Add cells with PER-KM values and diff_*_pct_km
                 [
                     item.jao_id,
                     item.pypsa_id,
@@ -818,13 +1034,13 @@ def visualize_parameter_comparison(matching_results, pypsa_gdf, output_dir="outp
                     item.circuits,
                     item.original_r_per_km.toFixed(6),
                     item.jao_r_km_adjusted.toFixed(6),
-                    item.diff_r_pct ? item.diff_r_pct.toFixed(2) + '%' : 'N/A',
+                    item.diff_r_pct_km ? (Math.abs(item.diff_r_pct_km) > 1000 ? (item.diff_r_pct_km > 0 ? '+' : '-') + '999.99%' : item.diff_r_pct_km.toFixed(2) + '%') : 'N/A',
                     item.original_x_per_km.toFixed(6),
                     item.jao_x_km_adjusted.toFixed(6),
-                    item.diff_x_pct ? item.diff_x_pct.toFixed(2) + '%' : 'N/A',
+                    item.diff_x_pct_km ? (Math.abs(item.diff_x_pct_km) > 1000 ? (item.diff_x_pct_km > 0 ? '+' : '-') + '999.99%' : item.diff_x_pct_km.toFixed(2) + '%') : 'N/A',
                     item.original_b_per_km.toExponential(6),
                     item.jao_b_km_adjusted.toExponential(6),
-                    item.diff_b_pct ? item.diff_b_pct.toFixed(2) + '%' : 'N/A'
+                    item.diff_b_pct_km ? (Math.abs(item.diff_b_pct_km) > 1000 ? (item.diff_b_pct_km > 0 ? '+' : '-') + '999.99%' : item.diff_b_pct_km.toFixed(2) + '%') : 'N/A'
                 ].forEach((text, index) => {
                     const td = document.createElement('td');
                     td.textContent = text;
