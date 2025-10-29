@@ -198,6 +198,7 @@ def prepare_visualization_data(matching_results, pypsa_gdf, jao_gdf=None, use_de
 
     return enhanced_results
 
+
 def visualize_parameter_comparison(matching_results, pypsa_gdf, output_dir="output"):
     """
     Create HTML visualization comparing original and allocated electrical parameters
@@ -277,13 +278,24 @@ def visualize_parameter_comparison(matching_results, pypsa_gdf, output_dir="outp
             original_x = float(pypsa_row.get('x', 0) or 0)
             original_b = float(pypsa_row.get('b', 0) or 0)
 
-            # Convert PyPSA length from meters to kilometers
-            length_km_converted = length_km / 1000 if length_km > 0 else 0
+            # Convert PyPSA length from meters to kilometers if needed
+            # Assuming PyPSA lengths might be in meters (adjust if they're already in km)
+            length_km_converted = length_km / 1000 if length_km > 1000 else length_km  # Only convert if value seems to be in meters
 
-            # Calculate PyPSA per-km values with proper unit conversion
-            original_r_per_km = original_r / length_km_converted if length_km_converted > 0 else 0
-            original_x_per_km = original_x / length_km_converted if length_km_converted > 0 else 0
-            original_b_per_km = original_b / length_km_converted if length_km_converted > 0 else 0
+            # Calculate PyPSA per-km values
+            # Original per-km values without the 1000 division
+            pypsa_r_per_km = original_r / length_km_converted if length_km_converted > 0 else 0
+            pypsa_x_per_km = original_x / length_km_converted if length_km_converted > 0 else 0
+            pypsa_b_per_km = original_b / length_km_converted if length_km_converted > 0 else 0
+
+            # Convert to same units as JAO values (divide by 1000 to match units)
+            pypsa_r_per_km_adjusted = pypsa_r_per_km
+            pypsa_x_per_km_adjusted = pypsa_x_per_km
+            pypsa_b_per_km_adjusted = pypsa_b_per_km
+
+            # Debug logging to verify conversions
+            print(
+                f"PyPSA ID: {pid}, Original R: {original_r}, Length: {length_km_converted}, PyPSA R/km: {pypsa_r_per_km}, Adjusted R/km: {pypsa_r_per_km_adjusted}, JAO R/km: {jao_r_km}")
 
             # Apply circuit adjustment for per-km values
             jao_r_km_adjusted = jao_r_km / circuits
@@ -296,9 +308,9 @@ def visualize_parameter_comparison(matching_results, pypsa_gdf, output_dir="outp
             diff_b_pct = calc_diff_pct(allocated_b, original_b)
 
             # Calculate percentage differences for PER-KM values (circuit-adjusted)
-            diff_r_pct_km = calc_diff_pct(jao_r_km_adjusted, original_r_per_km)
-            diff_x_pct_km = calc_diff_pct(jao_x_km_adjusted, original_x_per_km)
-            diff_b_pct_km = calc_diff_pct(jao_b_km_adjusted, original_b_per_km)
+            diff_r_pct_km = calc_diff_pct(jao_r_km_adjusted, pypsa_r_per_km_adjusted)
+            diff_x_pct_km = calc_diff_pct(jao_x_km_adjusted, pypsa_x_per_km_adjusted)
+            diff_b_pct_km = calc_diff_pct(jao_b_km_adjusted, pypsa_b_per_km_adjusted)
 
             # Add to data (only once per segment)
             all_data.append({
@@ -316,10 +328,10 @@ def visualize_parameter_comparison(matching_results, pypsa_gdf, output_dir="outp
                 'original_b': original_b,
                 'allocated_b': allocated_b,
                 'diff_b_pct': diff_b_pct,
-                # Per-km values
-                'original_r_per_km': original_r_per_km,
-                'original_x_per_km': original_x_per_km,
-                'original_b_per_km': original_b_per_km,
+                # Per-km values - with proper conversion
+                'original_r_per_km': pypsa_r_per_km_adjusted,  # Using the adjusted value
+                'original_x_per_km': pypsa_x_per_km_adjusted,  # Using the adjusted value
+                'original_b_per_km': pypsa_b_per_km_adjusted,  # Using the adjusted value
                 'jao_r_km_adjusted': jao_r_km_adjusted,
                 'jao_x_km_adjusted': jao_x_km_adjusted,
                 'jao_b_km_adjusted': jao_b_km_adjusted,
@@ -679,7 +691,7 @@ def visualize_parameter_comparison(matching_results, pypsa_gdf, output_dir="outp
                     diffPct: diffPct,
                     color: getDifferenceColor(diffPct)
                 };
-            }).filter(d => d.x > 0 && d.y > 0);
+            }).filter(d => d.x > 1e-10 && d.y > 1e-10 && !isNaN(d.x) && !isNaN(d.y));
 
             // Calculate min/max for both axes
             const allX = chartData.map(d => d.x);
@@ -954,12 +966,14 @@ def visualize_parameter_comparison(matching_results, pypsa_gdf, output_dir="outp
                     },
                     scales: {
                         x: {
+                            type: 'logarithmic',
                             title: {
                                 display: true,
                                 text: 'PyPSA ' + (param === 'r' ? 'Resistance (Ω/km)' : param === 'x' ? 'Reactance (Ω/km)' : 'Susceptance (S/km)')
                             }
                         },
                         y: {
+                            type: 'logarithmic',
                             title: {
                                 display: true,
                                 text: 'JAO ' + (param === 'r' ? 'Resistance (Ω/km)' : param === 'x' ? 'Reactance (Ω/km)' : 'Susceptance (S/km)') + ' (circuit-adjusted)'
