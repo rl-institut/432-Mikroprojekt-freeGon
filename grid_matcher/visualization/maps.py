@@ -3,7 +3,23 @@ from folium import folium
 from folium.plugins import MeasureControl
 
 
-def create_jao_pypsa_visualization(jao_gdf, pypsa_gdf, matching_results, output_path):
+def create_jao_pypsa_visualization(source_gdf, pypsa_gdf, results, map_file):
+    # Add this debugging code at the beginning
+    print(f"Visualization received {len(results)} total results")
+    matched_count = sum(1 for r in results if r.get("matched", False))
+    print(f"Results contain {matched_count} matched lines")
+
+    # Print a sample match to check format
+    if matched_count > 0:
+        sample = next(r for r in results if r.get("matched", False))
+        print(f"Sample match format: {sample}")
+
+    # Rename variables to match the rest of the function
+    jao_gdf = source_gdf
+    matching_results = results
+    output_path = map_file
+
+    print(f"Creating visualization at {output_path}...")
     """
     Create an interactive Leaflet visualization comparing JAO and PyPSA grid lines,
     including rich filters, search, stats, and parameter tables.
@@ -45,6 +61,8 @@ def create_jao_pypsa_visualization(jao_gdf, pypsa_gdf, matching_results, output_
         import shapely.geometry as sgeom
     except Exception as e:  # pragma: no cover
         raise RuntimeError("Shapely is required for geometry handling.") from e
+
+    output_path = map_file  # Define output_path for consistency
 
     print(f"Creating visualization at {output_path}...")
 
@@ -324,6 +342,14 @@ def create_jao_pypsa_visualization(jao_gdf, pypsa_gdf, matching_results, output_
                 },
                 "geometry": {"type": "LineString", "coordinates": _coords(ls)}
             })
+
+    # After all JAO features are created
+    print(f"Created {len(jao_features)} JAO features")
+    if len(jao_features) > 0:
+        print("Debug: First 5 JAO features status values:")
+        for i, feature in enumerate(jao_features[:min(5, len(jao_features))]):
+            print(
+                f"  Feature {i}: id={feature['properties']['id']}, status={feature['properties']['status']}, matchStatus={feature['properties']['matchStatus']}")
 
     # PyPSA features
     for _, row in pypsa_gdf.iterrows():
@@ -1071,25 +1097,14 @@ var pypsaLines = {pypsa_json};
 
 // Styles
 function jaoStyle(feature) {{
-    // Special styling for DC links
-    if (feature.properties.voltageClass === "DC") {{
-        switch (feature.properties.status) {{
-            case "matched": return {{color: "#006400", weight: 4, opacity: 0.85, dashArray: "8,4"}};
-            case "geometric": return {{color:"#00688B", weight:4, opacity:0.85, dashArray:"10,5"}};
-            case "parallel": return {{color:"#8B008B", weight:4, opacity:0.85, dashArray:"5,5"}};
-            case "parallel_voltage": return {{color:"#CD6600", weight:4, opacity:0.85, dashArray:"10,2,2,2"}};
-            case "duplicate": return {{color:"#DA70D6", weight:4, opacity:0.85, dashArray:"2,5"}};
-            default: return {{color:"#8B0000", weight:4, opacity:0.85, dashArray:"8,4"}};
-        }}
+    // Simplified version to test basic matching
+    console.log("Styling JAO feature:", feature.properties.id, "status:", feature.properties.status, "matchStatus:", feature.properties.matchStatus);
+    
+    // First try the matchStatus
+    if (feature.properties.matchStatus === "matched") {{
+        return {{color: "green", weight: 3, opacity: 0.85}};
     }} else {{
-        switch (feature.properties.status) {{
-            case "matched": return {{color: "green", weight: 3, opacity: 0.85}};
-            case "geometric": return {{color:"#00BFFF", weight:3, opacity:0.85, dashArray:"10,5"}};
-            case "parallel": return {{color:"#9932CC", weight:3, opacity:0.85, dashArray:"5,5"}};
-            case "parallel_voltage": return {{color:"#FF8C00", weight:3, opacity:0.85, dashArray:"10,2,2,2"}};
-            case "duplicate": return {{color:"#DA70D6", weight:3, opacity:0.85, dashArray:"2,5"}};
-            default: return {{color:"red", weight:3, opacity:0.85}};
-        }}
+        return {{color: "red", weight: 3, opacity: 0.85}};
     }}
 }}
 
@@ -1802,6 +1817,7 @@ def create_enhanced_visualization(jao_gdf, pypsa_gdf, matches, output_path, dc_l
         elif not is_matched and is_220kv:
             gj.add_to(pypsa_unmatched_220)
 
+
     # Process JAO lines
     for _, jao_row in jao_gdf.iterrows():
         jao_id = str(jao_row['id'])
@@ -2454,3 +2470,258 @@ def create_specialized_visualization(gdf, output_path, line_type="110kV"):
     return output_path
 
 
+def create_osm_pypsa_match_visualization(osm_gdf, pypsa_gdf, matching_results, output_path):
+    """
+    Create an interactive Leaflet visualization showing matches between OSM and PyPSA grid lines.
+
+    Parameters
+    ----------
+    osm_gdf : GeoDataFrame
+        OpenStreetMap lines with geometry in lon/lat (EPSG:4326).
+        Should include columns: 'id', 'voltage', 'length_km' (or 'length')
+    pypsa_gdf : GeoDataFrame
+        PyPSA lines with geometry in lon/lat (EPSG:4326).
+        Should include columns: 'id', 'v_nom', 'length' (typically in meters)
+    matching_results : list[dict]
+        Results of the matching step. Each dict should include:
+        - 'matched' (bool): Whether this represents a match
+        - 'osm_id' (str/int): ID of the OSM line
+        - 'pypsa_ids' (list[str] or str): PyPSA IDs that match this OSM line
+        - 'match_type' (str): Type of match ('regular', 'geometric', 'parallel', etc.)
+        - 'match_quality' (str, optional): Quality indicator
+    output_path : str | Path
+        Path where the HTML file will be written
+
+    Returns
+    -------
+    str
+        Path to the generated HTML file
+    """
+    import json
+    import folium
+    from pathlib import Path
+    import pandas as pd
+    from folium.plugins import MarkerCluster
+
+    # Ensure output_path is a Path object
+    output_path = Path(output_path)
+
+    print(f"Creating OSM-PyPSA match visualization at {output_path}...")
+
+    # Convert to WGS84 if needed
+    def ensure_wgs84(gdf):
+        """Reproject to EPSG:4326 if needed"""
+        if gdf is None:
+            return gdf
+        if hasattr(gdf, "crs") and gdf.crs:
+            if getattr(gdf.crs, "to_epsg", lambda: None)() == 4326:
+                return gdf
+            if hasattr(gdf, "to_crs"):
+                return gdf.to_crs(4326)
+        return gdf
+
+    osm_gdf = ensure_wgs84(osm_gdf)
+    pypsa_gdf = ensure_wgs84(pypsa_gdf)
+
+    # Create base map - find center of all geometries
+    bounds = osm_gdf.total_bounds
+    center_lat = (bounds[1] + bounds[3]) / 2
+    center_lon = (bounds[0] + bounds[2]) / 2
+
+    m = folium.Map(location=[center_lat, center_lon], zoom_start=6,
+                   tiles='CartoDB positron', control_scale=True)
+
+    # Prepare match type information
+    match_types = {
+        "regular": {"color": "#00AA00", "label": "Regular Match"},
+        "geometric": {"color": "#0000FF", "label": "Geometric Match"},
+        "parallel": {"color": "#FFA500", "label": "Parallel Circuit"},
+        "parallel_voltage": {"color": "#AA00AA", "label": "Parallel Voltage"},
+        "duplicate": {"color": "#FF0000", "label": "Duplicate"},
+        "unmatched": {"color": "#888888", "label": "Unmatched"}
+    }
+
+    # Create feature groups for different match types
+    feature_groups = {
+        match_type: folium.FeatureGroup(name=info["label"])
+        for match_type, info in match_types.items()
+    }
+
+    # Add unmatched feature groups
+    feature_groups["osm_unmatched"] = folium.FeatureGroup(name="Unmatched OSM")
+    feature_groups["pypsa_unmatched"] = folium.FeatureGroup(name="Unmatched PyPSA")
+
+    # Track which OSM and PyPSA lines are matched
+    matched_osm_ids = set()
+    matched_pypsa_ids = set()
+
+    # Add matched lines to map
+    for result in matching_results:
+        if not result.get("matched", False):
+            continue
+
+        osm_id = str(result.get("osm_id", ""))
+        if not osm_id:
+            continue
+
+        matched_osm_ids.add(osm_id)
+
+        # Get match type
+        match_type = result.get("match_type", "regular").lower()
+        if match_type not in match_types:
+            match_type = "regular"
+
+        # Get matched PyPSA IDs
+        pypsa_ids = result.get("pypsa_ids", [])
+        if isinstance(pypsa_ids, str):
+            pypsa_ids = [pid.strip() for pid in pypsa_ids.replace(",", ";").split(";") if pid.strip()]
+
+        matched_pypsa_ids.update(pypsa_ids)
+
+        # Get OSM geometry
+        try:
+            osm_row = osm_gdf[osm_gdf["id"] == osm_id].iloc[0]
+            osm_geom = osm_row.geometry
+
+            # Convert to list of coordinates for folium
+            osm_coords = [[y, x] for x, y in zip(*osm_geom.xy)]
+
+            # Add to map with popup info
+            voltage = osm_row.get("voltage", "Unknown")
+            length = osm_row.get("length_km", osm_row.get("length", "Unknown"))
+
+            popup_text = f"""
+            <b>OSM ID:</b> {osm_id}<br>
+            <b>Voltage:</b> {voltage} kV<br>
+            <b>Length:</b> {length} km<br>
+            <b>Match Type:</b> {match_types[match_type]['label']}<br>
+            <b>Matched PyPSA IDs:</b> {', '.join(pypsa_ids)}
+            """
+
+            folium.PolyLine(
+                osm_coords,
+                color=match_types[match_type]["color"],
+                weight=3,
+                opacity=0.8,
+                popup=folium.Popup(popup_text, max_width=300)
+            ).add_to(feature_groups[match_type])
+
+        except (IndexError, KeyError) as e:
+            print(f"Error adding OSM line {osm_id}: {e}")
+
+    # Add unmatched OSM lines
+    for _, row in osm_gdf.iterrows():
+        osm_id = str(row.get("id", ""))
+        if osm_id not in matched_osm_ids:
+            try:
+                osm_geom = row.geometry
+                osm_coords = [[y, x] for x, y in zip(*osm_geom.xy)]
+
+                voltage = row.get("voltage", "Unknown")
+                length = row.get("length_km", row.get("length", "Unknown"))
+
+                popup_text = f"""
+                <b>OSM ID:</b> {osm_id}<br>
+                <b>Voltage:</b> {voltage} kV<br>
+                <b>Length:</b> {length} km<br>
+                <b>Status:</b> Unmatched
+                """
+
+                folium.PolyLine(
+                    osm_coords,
+                    color="#888888",
+                    weight=2,
+                    opacity=0.6,
+                    popup=folium.Popup(popup_text, max_width=300)
+                ).add_to(feature_groups["osm_unmatched"])
+
+            except Exception as e:
+                print(f"Error adding unmatched OSM line {osm_id}: {e}")
+
+    # Add unmatched PyPSA lines
+    for _, row in pypsa_gdf.iterrows():
+        pypsa_id = str(row.get("id", ""))
+        if pypsa_id not in matched_pypsa_ids:
+            try:
+                pypsa_geom = row.geometry
+                pypsa_coords = [[y, x] for x, y in zip(*pypsa_geom.xy)]
+
+                voltage = row.get("v_nom", "Unknown")
+                length = row.get("length", "Unknown")
+                if isinstance(length, (int, float)) and length > 1000:
+                    length = length / 1000  # Convert to km if in meters
+
+                popup_text = f"""
+                <b>PyPSA ID:</b> {pypsa_id}<br>
+                <b>Voltage:</b> {voltage} kV<br>
+                <b>Length:</b> {length} km<br>
+                <b>Status:</b> Unmatched
+                """
+
+                folium.PolyLine(
+                    pypsa_coords,
+                    color="#AAAAAA",
+                    weight=2,
+                    opacity=0.6,
+                    dashArray="5, 5",
+                    popup=folium.Popup(popup_text, max_width=300)
+                ).add_to(feature_groups["pypsa_unmatched"])
+
+            except Exception as e:
+                print(f"Error adding unmatched PyPSA line {pypsa_id}: {e}")
+
+    # Add all feature groups to map
+    for group in feature_groups.values():
+        group.add_to(m)
+
+    # Add layer control
+    folium.LayerControl(collapsed=False).add_to(m)
+
+    # Add map title and legend
+    title_html = '''
+    <div style="position: fixed; 
+                top: 10px; left: 50px; width: 300px; height: 30px; 
+                background-color: white; border-radius: 5px;
+                z-index: 900; font-size: 18px; font-weight: bold;
+                text-align: center; padding: 5px;">
+        OSM-PyPSA Line Matches
+    </div>
+    '''
+    m.get_root().html.add_child(folium.Element(title_html))
+
+    # Add legend
+    legend_html = '''
+    <div style="position: fixed; 
+                bottom: 50px; right: 50px; 
+                background-color: white; border-radius: 5px;
+                z-index: 900; padding: 10px;
+                font-size: 14px;">
+        <div style="font-weight: bold; margin-bottom: 5px;">Legend</div>
+    '''
+
+    for match_type, info in match_types.items():
+        legend_html += f'''
+        <div>
+            <span style="background-color: {info['color']}; 
+                         display: inline-block; width: 15px; height: 15px;
+                         margin-right: 5px;"></span>
+            {info['label']}
+        </div>
+        '''
+
+    legend_html += '''
+        <div>
+            <span style="background-color: #AAAAAA; 
+                         display: inline-block; width: 15px; height: 15px;
+                         margin-right: 5px; border: 1px dashed black;"></span>
+            Unmatched PyPSA
+        </div>
+    </div>
+    '''
+    m.get_root().html.add_child(folium.Element(legend_html))
+
+    # Save the map
+    m.save(output_path)
+    print(f"Map saved to {output_path}")
+
+    return str(output_path)

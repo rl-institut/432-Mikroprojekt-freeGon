@@ -1382,18 +1382,51 @@ def find_bus_based_paths(jao_gdf, pypsa_gdf, G):
     return results
 
 
-def find_visually_matching_lines(jao_gdf, pypsa_gdf, matches):
+def find_visually_matching_lines(jao_gdf, pypsa_gdf, matches, batch_size=500, max_candidates=50,
+                                 time_limit_sec=300, buffer_distance=0.005, min_score=0.65):
     """
     Find lines that visually match but weren't detected by other matching methods.
 
-    This function uses direction analysis, buffer overlap, and endpoint proximity
-    to identify visual matches between JAO and PyPSA lines.
+    Uses spatial indexing, batching and timeouts to efficiently process large datasets.
+
+    Parameters
+    ----------
+    jao_gdf : GeoDataFrame
+        GeoDataFrame with JAO lines
+    pypsa_gdf : GeoDataFrame
+        GeoDataFrame with PyPSA lines
+    matches : list
+        List of existing match dictionaries
+    batch_size : int, optional
+        Number of JAO lines to process in one batch
+    max_candidates : int, optional
+        Maximum PyPSA candidates to check for each JAO line
+    time_limit_sec : int, optional
+        Maximum seconds to run before returning results
+    buffer_distance : float, optional
+        Buffer distance in coordinate units (~500m at equator)
+    min_score : float, optional
+        Minimum score to consider a match valid
+
+    Returns
+    -------
+    list
+        Updated matches list
     """
-    print("Looking for visually matching lines with direction analysis...")
+    import time
+    from shapely.strtree import STRtree
+    from rtree import index
+    start_time = time.time()
+
+    print("\n===== FINDING VISUALLY MATCHING LINES =====")
 
     # Get all unmatched JAO lines
-    unmatched_jao = [r['jao_id'] for r in matches if not r.get('matched', False)]
-    print(f"Processing {len(unmatched_jao)} unmatched JAO lines")
+    unmatched_jao_ids = [r['jao_id'] for r in matches if not r.get('matched', False)]
+    print(f"Total unmatched JAO lines: {len(unmatched_jao_ids)}")
+
+    if not unmatched_jao_ids:
+        print("No unmatched JAO lines to process")
+        return matches
 
     # Get all unmatched PyPSA lines
     matched_pypsa_ids = set()
@@ -1402,145 +1435,255 @@ def find_visually_matching_lines(jao_gdf, pypsa_gdf, matches):
             if isinstance(match['pypsa_ids'], list):
                 matched_pypsa_ids.update(match['pypsa_ids'])
             else:
-                matched_pypsa_ids.update([id.strip() for id in match['pypsa_ids'].split(';')])
+                matched_pypsa_ids.add(match['pypsa_ids'])
 
-    unmatched_pypsa = [id for id in pypsa_gdf['id'] if id not in matched_pypsa_ids]
-    print(f"Found {len(unmatched_pypsa)} unmatched PyPSA lines")
+    unmatched_pypsa = [str(id) for id in pypsa_gdf['id'].astype(str) if str(id) not in matched_pypsa_ids]
+    unmatched_pypsa_gdf = pypsa_gdf[pypsa_gdf['id'].astype(str).isin(unmatched_pypsa)]
+    print(f"Unmatched PyPSA lines: {len(unmatched_pypsa)}")
 
-    # Count of fixed matches
-    fixed_count = 0
+    # Build spatial index for unmatched PyPSA lines
+    print("Building spatial index for PyPSA lines...")
 
-    # For each unmatched JAO line
-    for jao_id in unmatched_jao:
-        jao_row = jao_gdf[jao_gdf['id'] == jao_id]
-        if jao_row.empty or jao_row.iloc[0].geometry is None:
-            continue
+    # Check if we have valid geometries
+    valid_pypsa_geoms = unmatched_pypsa_gdf[unmatched_pypsa_gdf.geometry.notna()]
+    if len(valid_pypsa_geoms) == 0:
+        print("No valid PyPSA geometries for spatial indexing")
+        return matches
 
-        jao_geom = jao_row.iloc[0].geometry
-        jao_voltage = jao_row.iloc[0].get('v_nom', 0)
+    try:
+        # Create spatial index - use STRtree if possible, otherwise use bounds-based filtering
+        use_spatial_index = False
+        try:
+            pypsa_geoms = list(valid_pypsa_geoms.geometry)
+            pypsa_idx = STRtree(pypsa_geoms)
+            pypsa_id_map = {i: id for i, id in enumerate(valid_pypsa_geoms['id'])}
+            use_spatial_index = True
+            print(f"Created STRtree spatial index with {len(pypsa_geoms)} geometries")
+        except Exception as e:
+            print(f"STRtree creation failed: {e}, falling back to bounding box filtering")
+            use_spatial_index = False
 
-        # Get direction vector for JAO line
-        jao_vector = None
-        if jao_geom.geom_type == 'LineString':
-            coords = list(jao_geom.coords)
-            if len(coords) >= 2:
-                start = coords[0]
-                end = coords[-1]
-                jao_vector = np.array([end[0] - start[0], end[1] - start[1]])
-                jao_vector_len = np.linalg.norm(jao_vector)
-                if jao_vector_len > 0:
-                    jao_vector = jao_vector / jao_vector_len
-        elif jao_geom.geom_type == 'MultiLineString':
-            if len(jao_geom.geoms) > 0:
-                start = list(jao_geom.geoms[0].coords)[0]
-                end = list(jao_geom.geoms[-1].coords)[-1]
-                jao_vector = np.array([end[0] - start[0], end[1] - start[1]])
-                jao_vector_len = np.linalg.norm(jao_vector)
-                if jao_vector_len > 0:
-                    jao_vector = jao_vector / jao_vector_len
+        # Count of fixed matches
+        fixed_count = 0
+        processed_count = 0
 
-        # Create a buffer around the JAO line and separate buffers for endpoints
-        buffer_distance = 0.005  # ~500m buffer
-        jao_buffer = jao_geom.buffer(buffer_distance)
+        # Process in batches to avoid memory issues and allow timeouts
+        print(f"Processing in batches of {batch_size} lines...")
 
-        # Create endpoint buffers if available
-        start_point = get_start_point(jao_geom)
-        end_point = get_end_point(jao_geom)
+        for batch_start in range(0, len(unmatched_jao_ids), batch_size):
+            batch_end = min(batch_start + batch_size, len(unmatched_jao_ids))
+            batch_ids = unmatched_jao_ids[batch_start:batch_end]
 
-        start_buffer = start_point.buffer(buffer_distance * 2) if start_point else None
-        end_buffer = end_point.buffer(buffer_distance * 2) if end_point else None
+            print(f"Processing batch {batch_start // batch_size + 1}: "
+                  f"{len(batch_ids)} lines (overall progress: {processed_count}/{len(unmatched_jao_ids)})")
 
-        # Find PyPSA lines that significantly overlap with this buffer
-        best_match = None
-        best_score = 0.65  # Higher threshold with more criteria
+            batch_fixed = 0
+            batch_jao_gdf = jao_gdf[jao_gdf['id'].astype(str).isin(batch_ids)]
 
-        for pypsa_id in unmatched_pypsa:
-            pypsa_row = pypsa_gdf[pypsa_gdf['id'] == pypsa_id]
-            if pypsa_row.empty or pypsa_row.iloc[0].geometry is None:
-                continue
+            # For each unmatched JAO line in this batch
+            for _, jao_row in batch_jao_gdf.iterrows():
+                jao_id = str(jao_row['id'])
+                processed_count += 1
 
-            pypsa_geom = pypsa_row.iloc[0].geometry
-            pypsa_voltage = pypsa_row.iloc[0].get('voltage', 0)
+                # Check timeout periodically
+                if time.time() - start_time > time_limit_sec:
+                    print(f"\nTIMEOUT: Visual matching stopped after {time_limit_sec} seconds")
+                    print(f"Processed {processed_count}/{len(unmatched_jao_ids)} JAO lines")
+                    print(f"Fixed {fixed_count} matches before timeout")
+                    return matches
 
-            # Skip if voltage doesn't match
-            if not ((jao_voltage == 220 and pypsa_voltage == 220) or
-                    (jao_voltage in [380, 400] and pypsa_voltage in [380, 400])):
-                continue
+                # Skip if no valid geometry
+                if jao_row.geometry is None or jao_row.geometry.is_empty:
+                    continue
 
-            # Calculate overlap with main line buffer
-            try:
-                if jao_buffer.intersects(pypsa_geom):
-                    # Calculate percentage of PyPSA line within JAO buffer
-                    intersection = jao_buffer.intersection(pypsa_geom)
-                    overlap = intersection.length / pypsa_geom.length
+                jao_geom = jao_row.geometry
+                jao_voltage = jao_row.get('v_nom', 0)
 
-                    # Check endpoint buffers for better matching
-                    endpoint_match = 0
+                # Create a buffer around the JAO line
+                jao_buffer = jao_geom.buffer(buffer_distance)
 
-                    # Get PyPSA endpoints
-                    pypsa_start = get_start_point(pypsa_geom)
-                    pypsa_end = get_end_point(pypsa_geom)
+                # Get direction vector for JAO line
+                jao_vector = None
+                try:
+                    if jao_geom.geom_type == 'LineString':
+                        coords = list(jao_geom.coords)
+                        if len(coords) >= 2:
+                            start = coords[0]
+                            end = coords[-1]
+                            jao_vector = np.array([end[0] - start[0], end[1] - start[1]])
+                            jao_vector_len = np.linalg.norm(jao_vector)
+                            if jao_vector_len > 0:
+                                jao_vector = jao_vector / jao_vector_len
+                    elif jao_geom.geom_type == 'MultiLineString':
+                        if len(jao_geom.geoms) > 0:
+                            start = list(jao_geom.geoms[0].coords)[0]
+                            end = list(jao_geom.geoms[-1].coords)[-1]
+                            jao_vector = np.array([end[0] - start[0], end[1] - start[1]])
+                            jao_vector_len = np.linalg.norm(jao_vector)
+                            if jao_vector_len > 0:
+                                jao_vector = jao_vector / jao_vector_len
+                except Exception as e:
+                    print(f"Error calculating JAO vector for {jao_id}: {e}")
+                    jao_vector = None
 
-                    # Check if PyPSA endpoints are in JAO endpoint buffers
-                    if start_buffer and pypsa_start and start_buffer.contains(pypsa_start):
-                        endpoint_match += 0.5
-                    if end_buffer and pypsa_end and end_buffer.contains(pypsa_end):
-                        endpoint_match += 0.5
+                # Create endpoint buffers if available
+                try:
+                    start_point = get_start_point(jao_geom)
+                    end_point = get_end_point(jao_geom)
 
-                    # Check direction similarity
-                    direction_score = 0.5  # Default neutral
-                    if jao_vector is not None and pypsa_geom.geom_type in ('LineString', 'MultiLineString'):
-                        # Calculate PyPSA direction vector
-                        pypsa_vector = None
-                        if pypsa_geom.geom_type == 'LineString':
-                            coords = list(pypsa_geom.coords)
-                            if len(coords) >= 2:
-                                p_start = coords[0]
-                                p_end = coords[-1]
-                                pypsa_vector = np.array([p_end[0] - p_start[0], p_end[1] - p_start[1]])
-                        else:  # MultiLineString
-                            p_start = list(pypsa_geom.geoms[0].coords)[0]
-                            p_end = list(pypsa_geom.geoms[-1].coords)[-1]
-                            pypsa_vector = np.array([p_end[0] - p_start[0], p_end[1] - p_start[1]])
+                    start_buffer = start_point.buffer(buffer_distance * 2) if start_point else None
+                    end_buffer = end_point.buffer(buffer_distance * 2) if end_point else None
+                except Exception as e:
+                    print(f"Error creating endpoint buffers for {jao_id}: {e}")
+                    start_buffer, end_buffer = None, None
 
-                        if pypsa_vector is not None:
-                            pypsa_vector_len = np.linalg.norm(pypsa_vector)
-                            if pypsa_vector_len > 0:
-                                pypsa_vector = pypsa_vector / pypsa_vector_len
-                                # Calculate dot product (cosine of angle)
-                                direction_score = abs(np.dot(jao_vector, pypsa_vector))
+                # Find candidate PyPSA lines using spatial index
+                candidate_pypsa_ids = []
 
-                    # Combine scores: overlap, endpoint match, direction
-                    combined_score = (
-                            0.5 * overlap +  # Line overlap
-                            0.3 * endpoint_match +  # Endpoint matching
-                            0.2 * direction_score  # Direction similarity
-                    )
+                if use_spatial_index:
+                    try:
+                        # Query spatial index with the buffer
+                        candidate_indices = pypsa_idx.query(jao_buffer)
+                        candidate_pypsa_ids = [pypsa_id_map[i] for i in candidate_indices[:max_candidates]]
+                    except Exception as e:
+                        print(f"Spatial query error for {jao_id}: {e}")
+                        candidate_pypsa_ids = []
+                else:
+                    # Fallback: filter by bounding box overlap
+                    jao_bounds = jao_buffer.bounds
+                    for _, pypsa_row in unmatched_pypsa_gdf.iterrows():
+                        if pypsa_row.geometry is None:
+                            continue
 
-                    # If good match and better than previous matches
-                    if combined_score > best_score:
-                        best_match = pypsa_id
-                        best_score = combined_score
-            except Exception as e:
-                print(f"Error processing JAO {jao_id} with PyPSA {pypsa_id}: {e}")
-                continue
+                        pypsa_bounds = pypsa_row.geometry.bounds
+                        if (jao_bounds[0] <= pypsa_bounds[2] and jao_bounds[2] >= pypsa_bounds[0] and
+                                jao_bounds[1] <= pypsa_bounds[3] and jao_bounds[3] >= pypsa_bounds[1]):
+                            candidate_pypsa_ids.append(pypsa_row['id'])
+                            if len(candidate_pypsa_ids) >= max_candidates:
+                                break
 
-        # If we found a good match
-        if best_match:
-            # Find this JAO line in the results
-            for match in matches:
-                if match['jao_id'] == jao_id:
-                    match['matched'] = True
-                    match['pypsa_ids'] = [best_match]
-                    match['match_quality'] = f"Visual Match ({best_score:.2f})"
-                    unmatched_pypsa.remove(best_match)  # Remove from unmatched list
-                    fixed_count += 1
-                    print(f"  Fixed: JAO {jao_id} → PyPSA {best_match} (score: {best_score:.2f})")
-                    break
+                # Find best matching PyPSA line among candidates
+                best_match = None
+                best_score = min_score  # Minimum threshold
 
-    print(f"Fixed {fixed_count} visually matching lines with direction analysis")
-    return fixed_count
+                for pypsa_id in candidate_pypsa_ids:
+                    pypsa_rows = unmatched_pypsa_gdf[unmatched_pypsa_gdf['id'] == pypsa_id]
+                    if pypsa_rows.empty or pypsa_rows.iloc[0].geometry is None:
+                        continue
 
+                    pypsa_row = pypsa_rows.iloc[0]
+                    pypsa_geom = pypsa_row.geometry
+                    pypsa_voltage = pypsa_row.get('voltage', 0)
+
+                    # Skip if voltage doesn't match
+                    if not ((jao_voltage == 220 and pypsa_voltage == 220) or
+                            (jao_voltage in [380, 400] and pypsa_voltage in [380, 400])):
+                        continue
+
+                    try:
+                        if jao_buffer.intersects(pypsa_geom):
+                            # Calculate percentage of PyPSA line within JAO buffer
+                            intersection = jao_buffer.intersection(pypsa_geom)
+                            overlap = intersection.length / pypsa_geom.length
+
+                            # Check endpoint buffers for better matching
+                            endpoint_match = 0
+
+                            # Get PyPSA endpoints
+                            try:
+                                pypsa_start = get_start_point(pypsa_geom)
+                                pypsa_end = get_end_point(pypsa_geom)
+
+                                # Check if PyPSA endpoints are in JAO endpoint buffers
+                                if start_buffer and pypsa_start and start_buffer.contains(pypsa_start):
+                                    endpoint_match += 0.5
+                                if end_buffer and pypsa_end and end_buffer.contains(pypsa_end):
+                                    endpoint_match += 0.5
+                            except Exception:
+                                # If endpoint extraction fails, skip this part of scoring
+                                pass
+
+                            # Check direction similarity
+                            direction_score = 0.5  # Default neutral
+                            if jao_vector is not None and pypsa_geom.geom_type in ('LineString', 'MultiLineString'):
+                                # Calculate PyPSA direction vector
+                                pypsa_vector = None
+                                try:
+                                    if pypsa_geom.geom_type == 'LineString':
+                                        coords = list(pypsa_geom.coords)
+                                        if len(coords) >= 2:
+                                            p_start = coords[0]
+                                            p_end = coords[-1]
+                                            pypsa_vector = np.array([p_end[0] - p_start[0], p_end[1] - p_start[1]])
+                                    else:  # MultiLineString
+                                        p_start = list(pypsa_geom.geoms[0].coords)[0]
+                                        p_end = list(pypsa_geom.geoms[-1].coords)[-1]
+                                        pypsa_vector = np.array([p_end[0] - p_start[0], p_end[1] - p_start[1]])
+
+                                    if pypsa_vector is not None:
+                                        pypsa_vector_len = np.linalg.norm(pypsa_vector)
+                                        if pypsa_vector_len > 0:
+                                            pypsa_vector = pypsa_vector / pypsa_vector_len
+                                            # Calculate dot product (cosine of angle)
+                                            direction_score = abs(np.dot(jao_vector, pypsa_vector))
+                                except Exception:
+                                    # If vector calculation fails, keep default score
+                                    pass
+
+                            # Combine scores: overlap, endpoint match, direction
+                            combined_score = (
+                                    0.5 * overlap +  # Line overlap
+                                    0.3 * endpoint_match +  # Endpoint matching
+                                    0.2 * direction_score  # Direction similarity
+                            )
+
+                            # If good match and better than previous matches
+                            if combined_score > best_score:
+                                best_match = pypsa_id
+                                best_score = combined_score
+                    except Exception as e:
+                        continue  # Skip errors and continue with next candidate
+
+                # If we found a good match
+                if best_match:
+                    # Find this JAO line in the results
+                    for match in matches:
+                        if str(match.get('jao_id', '')) == jao_id:
+                            match['matched'] = True
+                            match['pypsa_ids'] = [best_match]
+                            match['match_quality'] = f"Visual Match ({best_score:.2f})"
+
+                            # Remove from unmatched lists
+                            if best_match in unmatched_pypsa:
+                                unmatched_pypsa.remove(best_match)
+
+                            batch_fixed += 1
+                            fixed_count += 1
+                            break
+
+                # Progress indicator for large batches
+                if len(batch_ids) > 50 and processed_count % 50 == 0:
+                    elapsed = time.time() - start_time
+                    print(f"  Progress: {processed_count}/{len(unmatched_jao_ids)} lines "
+                          f"processed, {fixed_count} fixed ({elapsed:.1f}s elapsed)")
+
+            print(f"  Batch complete: fixed {batch_fixed} matches in this batch")
+
+            # Report time usage after each batch
+            elapsed = time.time() - start_time
+            remaining = len(unmatched_jao_ids) - processed_count
+            print(f"  Time elapsed: {elapsed:.1f} seconds, "
+                  f"estimated remaining: {remaining / max(1, processed_count) * elapsed:.1f} seconds")
+
+        print(f"\nVisual matching complete: fixed {fixed_count}/{len(unmatched_jao_ids)} matches")
+        return matches
+
+    except Exception as e:
+        import traceback
+        print(f"ERROR in visual matching: {e}")
+        print(traceback.format_exc())
+        print(f"Returning {fixed_count} fixed matches before error")
+        return matches
 
 def catch_remaining_visual_matches(matching_results, jao_gdf, pypsa_gdf, buffer_meters=5000):
     """

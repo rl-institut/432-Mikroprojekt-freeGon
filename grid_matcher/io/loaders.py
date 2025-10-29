@@ -8,7 +8,7 @@ from shapely import wkt
 from collections import defaultdict
 
 from ..utils.logger import get_logger
-from ..geo.geometry import parse_linestring, get_start_point, get_end_point, calculate_length_meters, \
+from ..utils.helpers import parse_linestring, get_start_point, get_end_point, calculate_length_meters, \
     extract_coordinates
 
 logger = get_logger(__name__)
