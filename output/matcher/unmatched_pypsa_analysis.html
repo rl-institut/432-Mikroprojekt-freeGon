@@ -1,0 +1,2337 @@
+
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Unmatched PyPSA Lines Analysis</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 20px; line-height: 1.6; }
+            h1, h2 { color: #333; }
+            table { border-collapse: collapse; width: 100%; margin-top: 20px; }
+            th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+            th { background-color: #f2f2f2; position: sticky; top: 0; }
+            .summary { background-color: #f9f9f9; padding: 15px; border-radius: 5px; margin-bottom: 20px; }
+            .filters { margin-bottom: 20px; display: flex; flex-wrap: wrap; gap: 10px; }
+            .filter-group { display: flex; flex-direction: column; margin-right: 15px; }
+            .filter-group label { font-weight: bold; margin-bottom: 5px; }
+            input[type=text], select { padding: 8px; width: 180px; }
+            th.sortable { cursor: pointer; }
+            th.sortable::after { content: "⇅"; margin-left: 5px; color: #999; }
+            th.sort-asc::after { content: "↑"; color: #333; }
+            th.sort-desc::after { content: "↓"; color: #333; }
+            .table-container { max-height: 70vh; overflow-y: auto; }
+            .hidden { display: none; }
+        </style>
+    </head>
+    <body>
+        <h1>Unmatched PyPSA Lines Analysis</h1>
+
+        <div class="summary">
+            <h2>Summary</h2>
+            <p>Total unmatched PyPSA lines: 237</p>
+
+            <h3>Reasons for Unmatched Status:</h3>
+            <ul>
+    <li><strong>Unknown (may be duplicate path or parallel circuit)</strong>: 144 lines (60.8%)</li>
+<li><strong>Long line, possible cross-border or in area not covered by JAO</strong>: 57 lines (24.1%)</li>
+<li><strong>No nearby JAO lines</strong>: 36 lines (15.2%)</li>
+<li><strong>Non-standard voltage class</strong>: 1 lines (0.4%)</li>
+
+            </ul>
+        </div>
+
+        <div class="filters">
+            <div class="filter-group">
+                <label for="filterPyPSAID">PyPSA ID</label>
+                <input type="text" id="filterPyPSAID" placeholder="Filter PyPSA ID">
+            </div>
+            <div class="filter-group">
+                <label for="filterVoltage">Voltage (kV)</label>
+                <input type="text" id="filterVoltage" placeholder="Filter voltage">
+            </div>
+            <div class="filter-group">
+                <label for="filterBus0">Bus0</label>
+                <input type="text" id="filterBus0" placeholder="Filter bus0">
+            </div>
+            <div class="filter-group">
+                <label for="filterBus1">Bus1</label>
+                <input type="text" id="filterBus1" placeholder="Filter bus1">
+            </div>
+            <div class="filter-group">
+                <label for="filterLength">Length (km)</label>
+                <input type="text" id="filterLength" placeholder="Filter length">
+            </div>
+            <div class="filter-group">
+                <label for="filterReasons">Reasons</label>
+                <input type="text" id="filterReasons" placeholder="Filter reasons">
+            </div>
+            <div class="filter-group">
+                <label>&nbsp;</label>
+                <button onclick="clearFilters()">Clear Filters</button>
+            </div>
+        </div>
+
+        <div class="table-container">
+            <table id="resultsTable">
+                <thead>
+                    <tr>
+                        <th class="sortable" onclick="sortTable(0)">PyPSA ID</th>
+                        <th class="sortable" onclick="sortTable(1)">Voltage (kV)</th>
+                        <th class="sortable" onclick="sortTable(2)">Bus0</th>
+                        <th class="sortable" onclick="sortTable(3)">Bus1</th>
+                        <th class="sortable" onclick="sortTable(4)">Length (km)</th>
+                        <th class="sortable" onclick="sortTable(5)">Reasons Unmatched</th>
+                    </tr>
+                </thead>
+                <tbody>
+    
+                    <tr>
+                        <td>merged_relation/3693986-380-g+4</td>
+                        <td>380</td>
+                        <td>way/41334805-380</td>
+                        <td>way/147878692-380</td>
+                        <td>3.68</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_relation/3948325-400-a+2</td>
+                        <td>400</td>
+                        <td>way/49049745-400</td>
+                        <td>way/50319857-400</td>
+                        <td>48.93</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_relation/69489-380-a+1</td>
+                        <td>380</td>
+                        <td>way/18629425-380</td>
+                        <td>way/26245195-380</td>
+                        <td>44.09</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/105572022-2-220+6</td>
+                        <td>220</td>
+                        <td>DE87-220</td>
+                        <td>DE80-220</td>
+                        <td>6.00</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/106337111-1-220+1</td>
+                        <td>220</td>
+                        <td>DE166-220</td>
+                        <td>DE171-220</td>
+                        <td>9.37</td>
+                        <td>No nearby JAO lines</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/107686849-220+1</td>
+                        <td>220</td>
+                        <td>DE81-220</td>
+                        <td>DE82-220</td>
+                        <td>3.01</td>
+                        <td>No nearby JAO lines</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/108388734-1-220+1</td>
+                        <td>220</td>
+                        <td>way/41389594-220</td>
+                        <td>DE202-220</td>
+                        <td>13.38</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/108526478-2-220+2</td>
+                        <td>220</td>
+                        <td>way/85523877-220</td>
+                        <td>DE205-220</td>
+                        <td>1.52</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/109195942-1-220+2</td>
+                        <td>220</td>
+                        <td>way/24839976-220</td>
+                        <td>DE131-220</td>
+                        <td>3.76</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/1093664414-380+7</td>
+                        <td>380</td>
+                        <td>way/517421342-380</td>
+                        <td>way/59707532-380</td>
+                        <td>38.16</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/109507318-1-380+2</td>
+                        <td>380</td>
+                        <td>DE80-380</td>
+                        <td>way/1076001174-380</td>
+                        <td>2.66</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/109507318-2-220+1</td>
+                        <td>220</td>
+                        <td>DE80-220</td>
+                        <td>way/1076001174-220</td>
+                        <td>2.66</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/111963058-3-220+7</td>
+                        <td>220</td>
+                        <td>way/42861703-220</td>
+                        <td>DE39-220</td>
+                        <td>42.03</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/114377984-1-380+6</td>
+                        <td>380</td>
+                        <td>way/114319248-380</td>
+                        <td>way/37764852-380</td>
+                        <td>18.56</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/1185493736-380+1</td>
+                        <td>380</td>
+                        <td>way/955268863-380</td>
+                        <td>DE11-380</td>
+                        <td>57.56</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/121199247-2-220+3</td>
+                        <td>220</td>
+                        <td>DE69-220</td>
+                        <td>DE68-220</td>
+                        <td>7.38</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/128714149-1-220+4</td>
+                        <td>220</td>
+                        <td>DE166-220</td>
+                        <td>way/149987048-220</td>
+                        <td>54.22</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/131472622-380+2</td>
+                        <td>380</td>
+                        <td>DE187-380</td>
+                        <td>way/43688805-380</td>
+                        <td>18.06</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/143848416-220+1</td>
+                        <td>220</td>
+                        <td>way/152973139-220</td>
+                        <td>DE176-220</td>
+                        <td>16.32</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/143901793-1-220+1</td>
+                        <td>220</td>
+                        <td>DE179-220</td>
+                        <td>way/143903369-220</td>
+                        <td>2.51</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/145129281-2-220+2</td>
+                        <td>220</td>
+                        <td>DE180-220</td>
+                        <td>way/143903369-220</td>
+                        <td>25.53</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/146086014-220+2</td>
+                        <td>220</td>
+                        <td>way/169244940-220</td>
+                        <td>way/23284340-220</td>
+                        <td>27.51</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/151689335-1-380+1</td>
+                        <td>380</td>
+                        <td>DE94-380</td>
+                        <td>way/42797575-380</td>
+                        <td>3.17</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/151967297-2-220+3</td>
+                        <td>220</td>
+                        <td>way/151967291-220</td>
+                        <td>way/42097854-220</td>
+                        <td>19.61</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/153089338-220+2</td>
+                        <td>220</td>
+                        <td>way/152973139-220</td>
+                        <td>way/160929097-220</td>
+                        <td>13.89</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/155496642-1-220+1</td>
+                        <td>220</td>
+                        <td>way/35818137-220</td>
+                        <td>way/24478889-220</td>
+                        <td>5.90</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/189574879-220+2</td>
+                        <td>220</td>
+                        <td>way/25786404-220</td>
+                        <td>way/41334805-220</td>
+                        <td>14.84</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/191254576-220+2</td>
+                        <td>220</td>
+                        <td>way/24267175-220</td>
+                        <td>DE125-220</td>
+                        <td>3.73</td>
+                        <td>No nearby JAO lines</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/200409374-220+3</td>
+                        <td>220</td>
+                        <td>DE180-220</td>
+                        <td>way/1327333163-220</td>
+                        <td>36.87</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/200460375-1-380+2</td>
+                        <td>380</td>
+                        <td>way/35954395-380</td>
+                        <td>DE207-380</td>
+                        <td>1.31</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/207488613-380+1</td>
+                        <td>380</td>
+                        <td>DE127-380</td>
+                        <td>DE128-380</td>
+                        <td>2.04</td>
+                        <td>No nearby JAO lines</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/216987765-1-380+7</td>
+                        <td>380</td>
+                        <td>way/63114179-380</td>
+                        <td>way/68549340-380</td>
+                        <td>11.89</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/231741801-2-220+1</td>
+                        <td>220</td>
+                        <td>DE179-220</td>
+                        <td>way/1327333163-220</td>
+                        <td>21.03</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/241626236-220+2</td>
+                        <td>220</td>
+                        <td>DE64-220</td>
+                        <td>way/42507488-220</td>
+                        <td>1.61</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/24833555-380+5</td>
+                        <td>380</td>
+                        <td>way/24839976-380</td>
+                        <td>way/22761839-380</td>
+                        <td>22.17</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/24841695-220+1</td>
+                        <td>220</td>
+                        <td>way/24839976-220</td>
+                        <td>way/188276460-220</td>
+                        <td>2.78</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/25090745-380+1</td>
+                        <td>380</td>
+                        <td>way/1303270458-380</td>
+                        <td>way/23022100-380</td>
+                        <td>3.52</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/259468200-2-220+1</td>
+                        <td>220</td>
+                        <td>way/59707532-220</td>
+                        <td>DE18-220</td>
+                        <td>2.11</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/27196813-1-380+4</td>
+                        <td>380</td>
+                        <td>way/683227471-380</td>
+                        <td>way/85523877-380</td>
+                        <td>47.13</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/284925905-380+1</td>
+                        <td>380</td>
+                        <td>DE75-380</td>
+                        <td>DE69-380</td>
+                        <td>4.87</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/29380943-220+3</td>
+                        <td>220</td>
+                        <td>way/113546939-220</td>
+                        <td>way/63114179-220</td>
+                        <td>8.06</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/29472854-1-380+4</td>
+                        <td>380</td>
+                        <td>way/150200540-380</td>
+                        <td>way/29472852-380</td>
+                        <td>2.11</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/30132577-2-220+3</td>
+                        <td>220</td>
+                        <td>way/26472665-220</td>
+                        <td>way/27149550-220</td>
+                        <td>104.01</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/31333769-1-380+8</td>
+                        <td>380</td>
+                        <td>DE144-380</td>
+                        <td>way/22767509-380</td>
+                        <td>10.68</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/364135875-380+4</td>
+                        <td>380</td>
+                        <td>way/22761692-380</td>
+                        <td>way/22761839-380</td>
+                        <td>4.85</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/37826246-1-220+5</td>
+                        <td>220</td>
+                        <td>way/24267175-220</td>
+                        <td>way/27919734-220</td>
+                        <td>11.44</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/38243743-2-220+6</td>
+                        <td>220</td>
+                        <td>DE100-220</td>
+                        <td>DE122-220</td>
+                        <td>41.76</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/40162573-1-220+4</td>
+                        <td>220</td>
+                        <td>DE39-220</td>
+                        <td>way/29472852-220</td>
+                        <td>27.74</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/41374778-1-380+2</td>
+                        <td>380</td>
+                        <td>DE127-380</td>
+                        <td>way/24839976-380</td>
+                        <td>4.41</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/41374780-1-380+3</td>
+                        <td>380</td>
+                        <td>DE125-380</td>
+                        <td>way/27919734-380</td>
+                        <td>7.74</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/41981221-1-220+4</td>
+                        <td>220</td>
+                        <td>way/147521567-220</td>
+                        <td>way/1223405794-220</td>
+                        <td>21.53</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/41981234-220+2</td>
+                        <td>220</td>
+                        <td>way/147521567-220</td>
+                        <td>way/160929097-220</td>
+                        <td>31.43</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/42920875-2-220+2</td>
+                        <td>220</td>
+                        <td>way/1303270458-220</td>
+                        <td>way/23022100-220</td>
+                        <td>3.61</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/478868126-1-380+1</td>
+                        <td>380</td>
+                        <td>DE199-380</td>
+                        <td>way/25786404-380</td>
+                        <td>63.11</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/478868126-2-220+2</td>
+                        <td>220</td>
+                        <td>way/25306752-220</td>
+                        <td>way/25786404-220</td>
+                        <td>124.12</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/51370887-220+6</td>
+                        <td>220</td>
+                        <td>DE22-220</td>
+                        <td>DE21-220</td>
+                        <td>22.10</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/574577676-380+8</td>
+                        <td>380</td>
+                        <td>way/953757606-380</td>
+                        <td>way/810315511-380</td>
+                        <td>24.93</td>
+                        <td>No nearby JAO lines</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/59584539-2-220+1</td>
+                        <td>220</td>
+                        <td>way/24839976-220</td>
+                        <td>DE129-220</td>
+                        <td>11.19</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/60869542-2-220+1</td>
+                        <td>220</td>
+                        <td>way/113546939-220</td>
+                        <td>DE100-220</td>
+                        <td>4.10</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/61733762-2-220+2</td>
+                        <td>220</td>
+                        <td>DE89-220</td>
+                        <td>DE86-220</td>
+                        <td>5.18</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/66676884-2-220+1</td>
+                        <td>220</td>
+                        <td>way/1076001174-220</td>
+                        <td>DE80-220</td>
+                        <td>2.65</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/71503500-1-220+1</td>
+                        <td>220</td>
+                        <td>DE82-220</td>
+                        <td>DE84-220</td>
+                        <td>2.12</td>
+                        <td>No nearby JAO lines</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/74003877-380+1</td>
+                        <td>380</td>
+                        <td>DE27-380</td>
+                        <td>way/942448206-380</td>
+                        <td>2.70</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/781632468-3-220+3</td>
+                        <td>220</td>
+                        <td>DE39-220</td>
+                        <td>way/61918154-220</td>
+                        <td>34.78</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/79174511-2-220+4</td>
+                        <td>220</td>
+                        <td>DE93-220</td>
+                        <td>way/23380800-220</td>
+                        <td>4.83</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/856077610-2-220+3</td>
+                        <td>220</td>
+                        <td>DE126-220</td>
+                        <td>way/22761839-220</td>
+                        <td>2.14</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/87106532-220+5</td>
+                        <td>220</td>
+                        <td>DE100-220</td>
+                        <td>way/63114179-220</td>
+                        <td>4.14</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/906381479-1-380+1</td>
+                        <td>380</td>
+                        <td>way/24462426-380</td>
+                        <td>DE67-380</td>
+                        <td>3.41</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/908473140-380+1</td>
+                        <td>380</td>
+                        <td>DE147-380</td>
+                        <td>way/152403632-380</td>
+                        <td>5.76</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/971780154-1-220-b+1</td>
+                        <td>220</td>
+                        <td>way/26472665-220</td>
+                        <td>DE29-220</td>
+                        <td>29.61</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/997957650-380+8</td>
+                        <td>380</td>
+                        <td>way/951773852-380</td>
+                        <td>way/32904794-380</td>
+                        <td>52.55</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>merged_way/998005837-2-220+1</td>
+                        <td>220</td>
+                        <td>DE23-220</td>
+                        <td>DE24-220</td>
+                        <td>1.27</td>
+                        <td>No nearby JAO lines</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/10492657-220-b</td>
+                        <td>220</td>
+                        <td>way/23161029-220</td>
+                        <td>way/32843531-220</td>
+                        <td>27.71</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/10508903-225</td>
+                        <td>225</td>
+                        <td>way/129378915-225</td>
+                        <td>way/90854143-225</td>
+                        <td>15.63</td>
+                        <td>Non-standard voltage class; No nearby JAO lines</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/1082948-380</td>
+                        <td>380</td>
+                        <td>way/24268944-380</td>
+                        <td>DE141-380</td>
+                        <td>12.20</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/1082953-380-a</td>
+                        <td>380</td>
+                        <td>way/25426571-380</td>
+                        <td>DE141-380</td>
+                        <td>1.93</td>
+                        <td>No nearby JAO lines</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/1084358-380</td>
+                        <td>380</td>
+                        <td>way/870598507-380</td>
+                        <td>way/26593935-380</td>
+                        <td>4.37</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/1109593-380-b</td>
+                        <td>380</td>
+                        <td>DE69-380</td>
+                        <td>DE75-380</td>
+                        <td>4.89</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/1109599-380-b</td>
+                        <td>380</td>
+                        <td>DE69-380</td>
+                        <td>DE75-380</td>
+                        <td>4.89</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/1109599-380-c</td>
+                        <td>380</td>
+                        <td>DE75-380</td>
+                        <td>way/32472806-380</td>
+                        <td>2.37</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/1109616-220</td>
+                        <td>220</td>
+                        <td>way/24921206-220</td>
+                        <td>way/150267232-220</td>
+                        <td>3.43</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/1109619-220</td>
+                        <td>220</td>
+                        <td>way/24921206-220</td>
+                        <td>way/150267232-220</td>
+                        <td>3.43</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/1123975-220</td>
+                        <td>220</td>
+                        <td>DE92-220</td>
+                        <td>way/24921206-220</td>
+                        <td>8.51</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/1123976-220</td>
+                        <td>220</td>
+                        <td>DE92-220</td>
+                        <td>way/24921206-220</td>
+                        <td>8.44</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/11518116-380</td>
+                        <td>380</td>
+                        <td>way/29713902-380</td>
+                        <td>DE103-380</td>
+                        <td>4.23</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/11518117-380</td>
+                        <td>380</td>
+                        <td>way/29713902-380</td>
+                        <td>DE103-380</td>
+                        <td>4.23</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/1167333-220</td>
+                        <td>220</td>
+                        <td>way/24462426-220</td>
+                        <td>DE83-220</td>
+                        <td>20.03</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/1177425-220</td>
+                        <td>220</td>
+                        <td>way/946710698-220</td>
+                        <td>way/1091984573-220</td>
+                        <td>56.48</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/1177426-220</td>
+                        <td>220</td>
+                        <td>way/946710698-220</td>
+                        <td>way/1091984573-220</td>
+                        <td>56.48</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/1188841-380</td>
+                        <td>380</td>
+                        <td>way/11285720-380</td>
+                        <td>way/23583867-380</td>
+                        <td>29.67</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/12006830-380</td>
+                        <td>380</td>
+                        <td>way/31024391-380</td>
+                        <td>way/1134105414-380</td>
+                        <td>5.18</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/12198594-380</td>
+                        <td>380</td>
+                        <td>way/142487746-380</td>
+                        <td>DE20-380</td>
+                        <td>27.13</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/12198595-380</td>
+                        <td>380</td>
+                        <td>DE20-380</td>
+                        <td>way/142487746-380</td>
+                        <td>27.11</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/1225767-220-a</td>
+                        <td>220</td>
+                        <td>way/92024105-220</td>
+                        <td>way/91854336-220</td>
+                        <td>5.53</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/12300319-380</td>
+                        <td>380</td>
+                        <td>way/149256409-380</td>
+                        <td>way/24757392-380</td>
+                        <td>56.67</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/12300322-220</td>
+                        <td>220</td>
+                        <td>way/156673637-220</td>
+                        <td>way/167352587-220</td>
+                        <td>32.19</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/12479461-380-a</td>
+                        <td>380</td>
+                        <td>way/22964137-380</td>
+                        <td>DE96-380</td>
+                        <td>3.41</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/12479461-380-b</td>
+                        <td>380</td>
+                        <td>DE96-380</td>
+                        <td>way/24667346-380</td>
+                        <td>7.23</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/12479462-380-b</td>
+                        <td>380</td>
+                        <td>DE96-380</td>
+                        <td>way/24667346-380</td>
+                        <td>7.23</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/12818416-380</td>
+                        <td>380</td>
+                        <td>way/156673636-380</td>
+                        <td>way/29309786-380</td>
+                        <td>40.83</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/12825581-380</td>
+                        <td>380</td>
+                        <td>way/29309786-380</td>
+                        <td>way/456386244-380</td>
+                        <td>65.14</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/13073144-220</td>
+                        <td>220</td>
+                        <td>DE47-220</td>
+                        <td>way/26472665-220</td>
+                        <td>20.62</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/14488153-380</td>
+                        <td>380</td>
+                        <td>way/149256409-380</td>
+                        <td>way/25746125-380</td>
+                        <td>8.07</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/14510979-380</td>
+                        <td>380</td>
+                        <td>way/58429825-380</td>
+                        <td>way/30164703-380</td>
+                        <td>9.53</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/14510980-380</td>
+                        <td>380</td>
+                        <td>way/58429825-380</td>
+                        <td>way/30164703-380</td>
+                        <td>9.53</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/14514424-380-b</td>
+                        <td>380</td>
+                        <td>way/150200540-380</td>
+                        <td>way/114319248-380</td>
+                        <td>10.44</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/14595857-380-b</td>
+                        <td>380</td>
+                        <td>way/38661452-380</td>
+                        <td>DE161-380</td>
+                        <td>2.10</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/14595857-380-c</td>
+                        <td>380</td>
+                        <td>DE161-380</td>
+                        <td>DE162-380</td>
+                        <td>4.88</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/14597254-380</td>
+                        <td>380</td>
+                        <td>way/398680313-380</td>
+                        <td>way/940922557-380</td>
+                        <td>65.86</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/14617003-380-a</td>
+                        <td>380</td>
+                        <td>way/442199284-380</td>
+                        <td>DE119-380</td>
+                        <td>8.23</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/15751730-220</td>
+                        <td>220</td>
+                        <td>way/152924498-220</td>
+                        <td>relation/17591073-220</td>
+                        <td>12.30</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/1605949-220</td>
+                        <td>220</td>
+                        <td>way/24667346-220</td>
+                        <td>way/83916207-220</td>
+                        <td>22.26</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/1633120-380</td>
+                        <td>380</td>
+                        <td>way/24413992-380</td>
+                        <td>DE49-380</td>
+                        <td>1.79</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/1636726-220</td>
+                        <td>220</td>
+                        <td>way/152924508-220</td>
+                        <td>way/149987048-220</td>
+                        <td>13.20</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/1636750-380</td>
+                        <td>380</td>
+                        <td>DE5-380</td>
+                        <td>way/32063539-380</td>
+                        <td>7.32</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/1636782-220</td>
+                        <td>220</td>
+                        <td>way/1094015892-220</td>
+                        <td>way/32318130-220</td>
+                        <td>41.47</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/1641722-220</td>
+                        <td>220</td>
+                        <td>way/23641079-220</td>
+                        <td>DE160-220</td>
+                        <td>3.24</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/1659072-380</td>
+                        <td>380</td>
+                        <td>way/121199242-380</td>
+                        <td>way/425100082-380</td>
+                        <td>5.90</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/17189385-220</td>
+                        <td>220</td>
+                        <td>way/27919734-220</td>
+                        <td>way/49577401-220</td>
+                        <td>7.80</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/2147236-220-b</td>
+                        <td>220</td>
+                        <td>way/154869247-220</td>
+                        <td>way/395847307-220</td>
+                        <td>5.01</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/240489-220</td>
+                        <td>220</td>
+                        <td>way/40621568-220</td>
+                        <td>way/27149550-220</td>
+                        <td>55.04</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/240490-220</td>
+                        <td>220</td>
+                        <td>way/40621568-220</td>
+                        <td>way/27149550-220</td>
+                        <td>55.04</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/2450379-220</td>
+                        <td>220</td>
+                        <td>way/114319248-220</td>
+                        <td>way/33411203-220</td>
+                        <td>61.51</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/272729-220-b</td>
+                        <td>220</td>
+                        <td>way/32725957-220</td>
+                        <td>way/32966636-220</td>
+                        <td>21.87</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/2927597-380</td>
+                        <td>380</td>
+                        <td>way/157806991-380</td>
+                        <td>DE99-380</td>
+                        <td>5.97</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/2927598-380</td>
+                        <td>380</td>
+                        <td>way/157806991-380</td>
+                        <td>DE99-380</td>
+                        <td>5.97</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/2927599-380-a</td>
+                        <td>380</td>
+                        <td>way/157806991-380</td>
+                        <td>DE99-380</td>
+                        <td>6.43</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/2927600-380-a</td>
+                        <td>380</td>
+                        <td>way/157806991-380</td>
+                        <td>DE99-380</td>
+                        <td>6.43</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/3697399-380-b</td>
+                        <td>380</td>
+                        <td>DE185-380</td>
+                        <td>DE184-380</td>
+                        <td>1.04</td>
+                        <td>No nearby JAO lines</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/3707291-380-a</td>
+                        <td>380</td>
+                        <td>way/442199284-380</td>
+                        <td>DE119-380</td>
+                        <td>8.23</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/3717716-400</td>
+                        <td>400</td>
+                        <td>way/49049745-400</td>
+                        <td>way/397960460-400</td>
+                        <td>33.14</td>
+                        <td>No nearby JAO lines</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/3730414-220</td>
+                        <td>220</td>
+                        <td>way/173112252-220</td>
+                        <td>way/943135226-220</td>
+                        <td>30.18</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/3732388-380-c</td>
+                        <td>380</td>
+                        <td>DE158-380</td>
+                        <td>way/93341407-380</td>
+                        <td>13.19</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/3739951-220-b</td>
+                        <td>220</td>
+                        <td>way/23161029-220</td>
+                        <td>way/32843531-220</td>
+                        <td>27.71</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/3739955-380</td>
+                        <td>380</td>
+                        <td>way/149256409-380</td>
+                        <td>way/25746125-380</td>
+                        <td>8.07</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/3742237-220</td>
+                        <td>220</td>
+                        <td>way/943135226-220</td>
+                        <td>way/1081302145-220</td>
+                        <td>17.84</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/3742238-220</td>
+                        <td>220</td>
+                        <td>way/156673637-220</td>
+                        <td>way/167352587-220</td>
+                        <td>32.19</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/3749853-380-a</td>
+                        <td>380</td>
+                        <td>way/5404079-380</td>
+                        <td>way/26245195-380</td>
+                        <td>17.78</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/3749854-380-a</td>
+                        <td>380</td>
+                        <td>way/5404079-380</td>
+                        <td>way/26245195-380</td>
+                        <td>17.78</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/377770-380</td>
+                        <td>380</td>
+                        <td>way/18629425-380</td>
+                        <td>way/23907283-380</td>
+                        <td>16.91</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/3782492-380</td>
+                        <td>380</td>
+                        <td>way/88916034-380</td>
+                        <td>way/202865177-380</td>
+                        <td>7.18</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/3782493-380</td>
+                        <td>380</td>
+                        <td>way/88916034-380</td>
+                        <td>way/202865177-380</td>
+                        <td>7.18</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/3803496-220-b</td>
+                        <td>220</td>
+                        <td>way/89176939-220</td>
+                        <td>way/151967290-220</td>
+                        <td>20.56</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/3861963-220</td>
+                        <td>220</td>
+                        <td>way/28956649-220</td>
+                        <td>way/29417741-220</td>
+                        <td>35.66</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/3862869-380</td>
+                        <td>380</td>
+                        <td>way/24604789-380</td>
+                        <td>way/202164315-380</td>
+                        <td>5.36</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/3862874-220-b</td>
+                        <td>220</td>
+                        <td>way/23816140-220</td>
+                        <td>way/274621059-220</td>
+                        <td>26.49</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/3866868-220</td>
+                        <td>220</td>
+                        <td>way/499165542-220</td>
+                        <td>DE163-220</td>
+                        <td>6.35</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/3866869-220</td>
+                        <td>220</td>
+                        <td>way/499165542-220</td>
+                        <td>way/24705761-220</td>
+                        <td>90.74</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/3874449-380</td>
+                        <td>380</td>
+                        <td>way/108797675-380</td>
+                        <td>way/24705761-380</td>
+                        <td>87.98</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/3883856-380</td>
+                        <td>380</td>
+                        <td>way/24258096-380</td>
+                        <td>way/26474759-380</td>
+                        <td>26.15</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/3885046-380</td>
+                        <td>380</td>
+                        <td>way/157328339-380</td>
+                        <td>way/941198517-380</td>
+                        <td>121.52</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/3888200-220-a</td>
+                        <td>220</td>
+                        <td>way/957746797-220</td>
+                        <td>way/28397771-220</td>
+                        <td>34.32</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/3918229-220-b</td>
+                        <td>220</td>
+                        <td>way/31367940-220</td>
+                        <td>way/102743264-220</td>
+                        <td>78.31</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/3937928-220</td>
+                        <td>220</td>
+                        <td>way/25943440-220</td>
+                        <td>DE63-220</td>
+                        <td>6.49</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/3945260-220</td>
+                        <td>220</td>
+                        <td>way/42050342-220</td>
+                        <td>way/1327333163-220</td>
+                        <td>104.85</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/3989160-220</td>
+                        <td>220</td>
+                        <td>way/152924498-220</td>
+                        <td>relation/17591073-220</td>
+                        <td>12.30</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/4713421-220</td>
+                        <td>220</td>
+                        <td>way/943135226-220</td>
+                        <td>way/1081302145-220</td>
+                        <td>17.84</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/4815174-220</td>
+                        <td>220</td>
+                        <td>way/173112252-220</td>
+                        <td>way/943135226-220</td>
+                        <td>30.18</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/5247617-380</td>
+                        <td>380</td>
+                        <td>way/18629425-380</td>
+                        <td>way/23907283-380</td>
+                        <td>16.91</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/5497488-380-b</td>
+                        <td>380</td>
+                        <td>DE14-380</td>
+                        <td>DE13-380</td>
+                        <td>3.85</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/5497490-380-b</td>
+                        <td>380</td>
+                        <td>DE14-380</td>
+                        <td>DE13-380</td>
+                        <td>3.85</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/5581798-380-a</td>
+                        <td>380</td>
+                        <td>way/941198517-380</td>
+                        <td>DE58-380</td>
+                        <td>6.88</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/5581799-380-a</td>
+                        <td>380</td>
+                        <td>way/941198517-380</td>
+                        <td>DE58-380</td>
+                        <td>6.69</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/5581800-380-a</td>
+                        <td>380</td>
+                        <td>way/941198517-380</td>
+                        <td>DE58-380</td>
+                        <td>6.59</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/5581801-380-a</td>
+                        <td>380</td>
+                        <td>way/941198517-380</td>
+                        <td>DE58-380</td>
+                        <td>6.69</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/5581802-380-a</td>
+                        <td>380</td>
+                        <td>way/941198517-380</td>
+                        <td>DE58-380</td>
+                        <td>6.59</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/5581803-380-a</td>
+                        <td>380</td>
+                        <td>way/941198517-380</td>
+                        <td>DE58-380</td>
+                        <td>6.88</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/5603846-380</td>
+                        <td>380</td>
+                        <td>way/88901626-380</td>
+                        <td>way/88916034-380</td>
+                        <td>9.69</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>relation/943999-220</td>
+                        <td>220</td>
+                        <td>way/27124619-220</td>
+                        <td>DE4-220</td>
+                        <td>11.81</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/1002012656-380</td>
+                        <td>380</td>
+                        <td>way/951273401-380</td>
+                        <td>way/871646309-380</td>
+                        <td>1.42</td>
+                        <td>No nearby JAO lines</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/1104699062-380</td>
+                        <td>380</td>
+                        <td>DE200-380</td>
+                        <td>way/1093896544-380</td>
+                        <td>2.45</td>
+                        <td>No nearby JAO lines</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/1117834635-380</td>
+                        <td>380</td>
+                        <td>way/27919734-380</td>
+                        <td>DE117-380</td>
+                        <td>11.89</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/1130668496-1-380</td>
+                        <td>380</td>
+                        <td>DE140-380</td>
+                        <td>DE143-380</td>
+                        <td>2.23</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/1130668503-1-380</td>
+                        <td>380</td>
+                        <td>way/89043564-380</td>
+                        <td>DE140-380</td>
+                        <td>3.92</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/1131127616-2-220</td>
+                        <td>220</td>
+                        <td>DE30-220</td>
+                        <td>DE32-220</td>
+                        <td>6.80</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/1186186271-380</td>
+                        <td>380</td>
+                        <td>DE13-380</td>
+                        <td>DE14-380</td>
+                        <td>2.66</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/1216922903-220</td>
+                        <td>220</td>
+                        <td>way/953757608-220</td>
+                        <td>DE40-220</td>
+                        <td>2.42</td>
+                        <td>No nearby JAO lines</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/1222462381-1-220</td>
+                        <td>220</td>
+                        <td>way/942448206-220</td>
+                        <td>DE27-220</td>
+                        <td>2.58</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/1241983642-1-380</td>
+                        <td>380</td>
+                        <td>DE157-380</td>
+                        <td>way/93341407-380</td>
+                        <td>5.86</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/1254852017-380</td>
+                        <td>380</td>
+                        <td>DE137-380</td>
+                        <td>DE140-380</td>
+                        <td>1.25</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/128478125-1-380</td>
+                        <td>380</td>
+                        <td>DE172-380</td>
+                        <td>way/151967291-380</td>
+                        <td>10.57</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/1293441403-220</td>
+                        <td>220</td>
+                        <td>DE204-220</td>
+                        <td>DE206-220</td>
+                        <td>2.93</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/1311473763-380</td>
+                        <td>380</td>
+                        <td>way/943135226-380</td>
+                        <td>DE142-380</td>
+                        <td>6.62</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/141161434-380</td>
+                        <td>380</td>
+                        <td>DE125-380</td>
+                        <td>DE127-380</td>
+                        <td>3.36</td>
+                        <td>No nearby JAO lines</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/143901743-1-220</td>
+                        <td>220</td>
+                        <td>way/159326655-220</td>
+                        <td>DE179-220</td>
+                        <td>6.40</td>
+                        <td>No nearby JAO lines</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/145129282-220</td>
+                        <td>220</td>
+                        <td>way/207248812-220</td>
+                        <td>way/156676050-220</td>
+                        <td>3.24</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/148211531-380-b</td>
+                        <td>380</td>
+                        <td>DE134-380</td>
+                        <td>way/148211527-380</td>
+                        <td>3.62</td>
+                        <td>No nearby JAO lines</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/151967297-1-380</td>
+                        <td>380</td>
+                        <td>DE170-380</td>
+                        <td>way/42097854-380</td>
+                        <td>11.68</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/152924506-220</td>
+                        <td>220</td>
+                        <td>DE174-220</td>
+                        <td>way/152924508-220</td>
+                        <td>5.52</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/157332863-380</td>
+                        <td>380</td>
+                        <td>DE149-380</td>
+                        <td>way/166604822-380</td>
+                        <td>17.35</td>
+                        <td>No nearby JAO lines</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/157332865-380</td>
+                        <td>380</td>
+                        <td>DE149-380</td>
+                        <td>way/36183042-380</td>
+                        <td>4.58</td>
+                        <td>No nearby JAO lines</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/157807786-380</td>
+                        <td>380</td>
+                        <td>way/714098678-380</td>
+                        <td>way/442199284-380</td>
+                        <td>3.49</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/169244947-220</td>
+                        <td>220</td>
+                        <td>way/169244940-220</td>
+                        <td>way/23641079-220</td>
+                        <td>4.36</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/222638710-220-b</td>
+                        <td>220</td>
+                        <td>DE151-220</td>
+                        <td>way/1086825107-220</td>
+                        <td>15.67</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/22762380-220</td>
+                        <td>220</td>
+                        <td>way/1118059105-220</td>
+                        <td>DE126-220</td>
+                        <td>2.67</td>
+                        <td>No nearby JAO lines</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/231965957-220</td>
+                        <td>220</td>
+                        <td>DE43-220</td>
+                        <td>way/28227099-220</td>
+                        <td>1.33</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/243380065-220</td>
+                        <td>220</td>
+                        <td>way/28227099-220</td>
+                        <td>way/97857512-220</td>
+                        <td>3.66</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/24415006-380</td>
+                        <td>380</td>
+                        <td>way/157628351-380</td>
+                        <td>DE65-380</td>
+                        <td>6.87</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/24840438-2-220</td>
+                        <td>220</td>
+                        <td>way/24839976-220</td>
+                        <td>way/188276460-220</td>
+                        <td>2.79</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/257482750-220</td>
+                        <td>220</td>
+                        <td>DE23-220</td>
+                        <td>way/940636813-220</td>
+                        <td>3.83</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/284698723-220</td>
+                        <td>220</td>
+                        <td>way/24667346-220</td>
+                        <td>way/698870101-220</td>
+                        <td>4.57</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/290288900-380</td>
+                        <td>380</td>
+                        <td>way/311444692-380</td>
+                        <td>way/311444691-380</td>
+                        <td>3.45</td>
+                        <td>No nearby JAO lines</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/31669070-380</td>
+                        <td>380</td>
+                        <td>way/883768277-380</td>
+                        <td>way/883768276-380</td>
+                        <td>1.70</td>
+                        <td>No nearby JAO lines</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/318302077-380</td>
+                        <td>380</td>
+                        <td>DE11-380</td>
+                        <td>way/24502420-380</td>
+                        <td>1.53</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/32950166-2-220</td>
+                        <td>220</td>
+                        <td>DE22-220</td>
+                        <td>DE23-220</td>
+                        <td>2.86</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/33548105-1-220</td>
+                        <td>220</td>
+                        <td>way/37764852-220</td>
+                        <td>DE38-220</td>
+                        <td>2.85</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/33812397-380</td>
+                        <td>380</td>
+                        <td>way/871646309-380</td>
+                        <td>way/24493551-380</td>
+                        <td>3.58</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/34897791-2-220</td>
+                        <td>220</td>
+                        <td>DE138-220</td>
+                        <td>way/22766160-220</td>
+                        <td>8.54</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/34942575-220</td>
+                        <td>220</td>
+                        <td>DE27-220</td>
+                        <td>DE24-220</td>
+                        <td>15.05</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/349635742-220</td>
+                        <td>220</td>
+                        <td>DE176-220</td>
+                        <td>DE180-220</td>
+                        <td>6.06</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/38584672-220</td>
+                        <td>220</td>
+                        <td>way/1303270458-220</td>
+                        <td>way/38584673-220</td>
+                        <td>2.30</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/40854817-380</td>
+                        <td>380</td>
+                        <td>DE186-380</td>
+                        <td>DE187-380</td>
+                        <td>1.54</td>
+                        <td>No nearby JAO lines</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/40895968-380</td>
+                        <td>380</td>
+                        <td>way/942448206-380</td>
+                        <td>DE27-380</td>
+                        <td>3.99</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/41339399-1-380</td>
+                        <td>380</td>
+                        <td>way/95434457-380</td>
+                        <td>DE125-380</td>
+                        <td>2.65</td>
+                        <td>No nearby JAO lines</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/41339399-2-220</td>
+                        <td>220</td>
+                        <td>way/95434457-220</td>
+                        <td>DE125-220</td>
+                        <td>2.63</td>
+                        <td>No nearby JAO lines</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/41374777-380</td>
+                        <td>380</td>
+                        <td>DE127-380</td>
+                        <td>way/24839976-380</td>
+                        <td>4.45</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/41374780-2-220</td>
+                        <td>220</td>
+                        <td>DE125-220</td>
+                        <td>way/27919734-220</td>
+                        <td>7.74</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/42920726-1-220</td>
+                        <td>220</td>
+                        <td>DE80-220</td>
+                        <td>DE81-220</td>
+                        <td>1.72</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/43201818-380</td>
+                        <td>380</td>
+                        <td>DE186-380</td>
+                        <td>DE182-380</td>
+                        <td>31.96</td>
+                        <td>Long line, possible cross-border or in area not covered by JAO</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/70691555-1-220</td>
+                        <td>220</td>
+                        <td>DE84-220</td>
+                        <td>DE86-220</td>
+                        <td>1.31</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/712379294-220</td>
+                        <td>220</td>
+                        <td>DE108-220</td>
+                        <td>way/172997498-220</td>
+                        <td>7.44</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/760912582-1-220</td>
+                        <td>220</td>
+                        <td>DE42-220</td>
+                        <td>DE38-220</td>
+                        <td>9.98</td>
+                        <td>No nearby JAO lines</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/812676716-220-a</td>
+                        <td>220</td>
+                        <td>way/1086825107-220</td>
+                        <td>DE151-220</td>
+                        <td>15.74</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/812686808-220</td>
+                        <td>220</td>
+                        <td>way/152219167-220</td>
+                        <td>DE151-220</td>
+                        <td>8.62</td>
+                        <td>No nearby JAO lines</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/844075807-1-380</td>
+                        <td>380</td>
+                        <td>way/844075808-380</td>
+                        <td>DE54-380</td>
+                        <td>9.74</td>
+                        <td>No nearby JAO lines</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/844126084-380</td>
+                        <td>380</td>
+                        <td>way/799361667-380</td>
+                        <td>way/844075808-380</td>
+                        <td>3.13</td>
+                        <td>No nearby JAO lines</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/844126085-380</td>
+                        <td>380</td>
+                        <td>way/799361667-380</td>
+                        <td>way/844075808-380</td>
+                        <td>3.14</td>
+                        <td>No nearby JAO lines</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/844126088-380</td>
+                        <td>380</td>
+                        <td>way/799361667-380</td>
+                        <td>way/844075808-380</td>
+                        <td>3.14</td>
+                        <td>No nearby JAO lines</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/844126089-380</td>
+                        <td>380</td>
+                        <td>way/799361667-380</td>
+                        <td>way/844075808-380</td>
+                        <td>3.15</td>
+                        <td>No nearby JAO lines</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/844126090-380</td>
+                        <td>380</td>
+                        <td>way/311444691-380</td>
+                        <td>way/799361667-380</td>
+                        <td>5.61</td>
+                        <td>No nearby JAO lines</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/844126092-380</td>
+                        <td>380</td>
+                        <td>way/311444692-380</td>
+                        <td>DE67-380</td>
+                        <td>13.26</td>
+                        <td>No nearby JAO lines</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/908473137-1-380</td>
+                        <td>380</td>
+                        <td>DE148-380</td>
+                        <td>DE147-380</td>
+                        <td>1.63</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/92877623-220</td>
+                        <td>220</td>
+                        <td>DE106-220</td>
+                        <td>way/92877635-220</td>
+                        <td>1.56</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/92913327-2-220</td>
+                        <td>220</td>
+                        <td>way/207756597-220</td>
+                        <td>way/54359256-220</td>
+                        <td>5.68</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/953757607-380</td>
+                        <td>380</td>
+                        <td>way/953757606-380</td>
+                        <td>way/953757608-380</td>
+                        <td>12.79</td>
+                        <td>No nearby JAO lines</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/953757609-380</td>
+                        <td>380</td>
+                        <td>way/953757606-380</td>
+                        <td>way/953757608-380</td>
+                        <td>12.78</td>
+                        <td>No nearby JAO lines</td>
+                    </tr>
+        
+                    <tr>
+                        <td>way/971780154-1-220-a</td>
+                        <td>220</td>
+                        <td>way/33169401-220</td>
+                        <td>DE29-220</td>
+                        <td>7.69</td>
+                        <td>Unknown (may be duplicate path or parallel circuit)</td>
+                    </tr>
+        
+                </tbody>
+            </table>
+        </div>
+
+        <script>
+            // Column filtering functionality
+            const filters = {
+                'filterPyPSAID': 0,
+                'filterVoltage': 1,
+                'filterBus0': 2,
+                'filterBus1': 3,
+                'filterLength': 4,
+                'filterReasons': 5
+            };
+
+            // Add event listeners to all filter inputs
+            for (const [filterId, colIndex] of Object.entries(filters)) {
+                document.getElementById(filterId).addEventListener('input', function() {
+                    filterTable();
+                });
+            }
+
+            function filterTable() {
+                const table = document.getElementById('resultsTable');
+                const rows = table.getElementsByTagName('tr');
+
+                // Skip header row
+                for (let i = 1; i < rows.length; i++) {
+                    let showRow = true;
+                    const row = rows[i];
+
+                    // Check each filter
+                    for (const [filterId, colIndex] of Object.entries(filters)) {
+                        const filterValue = document.getElementById(filterId).value.toLowerCase();
+                        if (filterValue) {
+                            const cell = row.getElementsByTagName('td')[colIndex];
+                            const cellText = cell.textContent.toLowerCase();
+
+                            if (cellText.indexOf(filterValue) === -1) {
+                                showRow = false;
+                                break;
+                            }
+                        }
+                    }
+
+                    // Show or hide row
+                    row.style.display = showRow ? '' : 'none';
+                }
+            }
+
+            function clearFilters() {
+                for (const filterId of Object.keys(filters)) {
+                    document.getElementById(filterId).value = '';
+                }
+                filterTable();
+            }
+
+            // Sorting functionality
+            let currentSortCol = -1;
+            let sortAscending = true;
+
+            function sortTable(colIndex) {
+                const table = document.getElementById('resultsTable');
+                const tbody = table.getElementsByTagName('tbody')[0];
+                const rows = Array.from(tbody.getElementsByTagName('tr'));
+
+                // Update sort direction
+                if (currentSortCol === colIndex) {
+                    sortAscending = !sortAscending;
+                } else {
+                    sortAscending = true;
+
+                    // Reset all column headers
+                    const headers = table.getElementsByTagName('th');
+                    for (let i = 0; i < headers.length; i++) {
+                        headers[i].classList.remove('sort-asc', 'sort-desc');
+                    }
+                }
+
+                // Update sort indicator
+                const header = table.getElementsByTagName('th')[colIndex];
+                header.classList.remove('sort-asc', 'sort-desc');
+                header.classList.add(sortAscending ? 'sort-asc' : 'sort-desc');
+
+                currentSortCol = colIndex;
+
+                // Sort rows
+                rows.sort((a, b) => {
+                    let valueA = a.getElementsByTagName('td')[colIndex].textContent;
+                    let valueB = b.getElementsByTagName('td')[colIndex].textContent;
+
+                    // Handle numeric values (voltage, length)
+                    if (colIndex === 1 || colIndex === 4) {
+                        valueA = parseFloat(valueA) || 0;
+                        valueB = parseFloat(valueB) || 0;
+                        return sortAscending ? valueA - valueB : valueB - valueA;
+                    } 
+                    // Text values
+                    else {
+                        return sortAscending 
+                            ? valueA.localeCompare(valueB) 
+                            : valueB.localeCompare(valueA);
+                    }
+                });
+
+                // Reorder rows
+                rows.forEach(row => tbody.appendChild(row));
+            }
+
+            // Initial sort by voltage (descending)
+            document.addEventListener('DOMContentLoaded', function() {
+                sortTable(1);
+                sortTable(1); // Toggle to descending
+            });
+        </script>
+    </body>
+    </html>
+    

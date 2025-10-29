@@ -1,0 +1,238 @@
+pypsa_id,voltage,bus0,bus1,length_km,reasons_unmatched
+merged_relation/3948325-400-a+2,400,way/49049745-400,way/50319857-400,48.933510000000005,"Long line, possible cross-border or in area not covered by JAO"
+relation/3717716-400,400,way/49049745-400,way/397960460-400,33.13978,No nearby JAO lines
+relation/3885046-380,380,way/157328339-380,way/941198517-380,121.52453,"Long line, possible cross-border or in area not covered by JAO"
+relation/3874449-380,380,way/108797675-380,way/24705761-380,87.97716,"Long line, possible cross-border or in area not covered by JAO"
+relation/14597254-380,380,way/398680313-380,way/940922557-380,65.86224,"Long line, possible cross-border or in area not covered by JAO"
+relation/12825581-380,380,way/29309786-380,way/456386244-380,65.13573000000001,"Long line, possible cross-border or in area not covered by JAO"
+merged_way/478868126-1-380+1,380,DE199-380,way/25786404-380,63.11257,"Long line, possible cross-border or in area not covered by JAO"
+merged_way/1185493736-380+1,380,way/955268863-380,DE11-380,57.56194,"Long line, possible cross-border or in area not covered by JAO"
+relation/12300319-380,380,way/149256409-380,way/24757392-380,56.66516,"Long line, possible cross-border or in area not covered by JAO"
+merged_way/997957650-380+8,380,way/951773852-380,way/32904794-380,52.55108,"Long line, possible cross-border or in area not covered by JAO"
+merged_way/27196813-1-380+4,380,way/683227471-380,way/85523877-380,47.1337,"Long line, possible cross-border or in area not covered by JAO"
+merged_relation/69489-380-a+1,380,way/18629425-380,way/26245195-380,44.08703,"Long line, possible cross-border or in area not covered by JAO"
+relation/12818416-380,380,way/156673636-380,way/29309786-380,40.83249,"Long line, possible cross-border or in area not covered by JAO"
+merged_way/1093664414-380+7,380,way/517421342-380,way/59707532-380,38.16268,"Long line, possible cross-border or in area not covered by JAO"
+way/43201818-380,380,DE186-380,DE182-380,31.960060000000002,"Long line, possible cross-border or in area not covered by JAO"
+relation/1188841-380,380,way/11285720-380,way/23583867-380,29.66964,"Long line, possible cross-border or in area not covered by JAO"
+relation/12198594-380,380,way/142487746-380,DE20-380,27.12687,"Long line, possible cross-border or in area not covered by JAO"
+relation/12198595-380,380,DE20-380,way/142487746-380,27.109959999999997,"Long line, possible cross-border or in area not covered by JAO"
+relation/3883856-380,380,way/24258096-380,way/26474759-380,26.15336,"Long line, possible cross-border or in area not covered by JAO"
+merged_way/574577676-380+8,380,way/953757606-380,way/810315511-380,24.92552,No nearby JAO lines
+merged_way/24833555-380+5,380,way/24839976-380,way/22761839-380,22.167540000000002,"Long line, possible cross-border or in area not covered by JAO"
+merged_way/114377984-1-380+6,380,way/114319248-380,way/37764852-380,18.56259,Unknown (may be duplicate path or parallel circuit)
+merged_way/131472622-380+2,380,DE187-380,way/43688805-380,18.05931,Unknown (may be duplicate path or parallel circuit)
+relation/3749853-380-a,380,way/5404079-380,way/26245195-380,17.77884,Unknown (may be duplicate path or parallel circuit)
+relation/3749854-380-a,380,way/5404079-380,way/26245195-380,17.77884,Unknown (may be duplicate path or parallel circuit)
+way/157332863-380,380,DE149-380,way/166604822-380,17.34936,No nearby JAO lines
+relation/377770-380,380,way/18629425-380,way/23907283-380,16.91266,Unknown (may be duplicate path or parallel circuit)
+relation/5247617-380,380,way/18629425-380,way/23907283-380,16.91266,Unknown (may be duplicate path or parallel circuit)
+way/844126092-380,380,way/311444692-380,DE67-380,13.264850000000001,No nearby JAO lines
+relation/3732388-380-c,380,DE158-380,way/93341407-380,13.189129999999999,Unknown (may be duplicate path or parallel circuit)
+way/953757607-380,380,way/953757606-380,way/953757608-380,12.79341,No nearby JAO lines
+way/953757609-380,380,way/953757606-380,way/953757608-380,12.78481,No nearby JAO lines
+relation/1082948-380,380,way/24268944-380,DE141-380,12.2008,Unknown (may be duplicate path or parallel circuit)
+merged_way/216987765-1-380+7,380,way/63114179-380,way/68549340-380,11.8888,Unknown (may be duplicate path or parallel circuit)
+way/1117834635-380,380,way/27919734-380,DE117-380,11.88711,Unknown (may be duplicate path or parallel circuit)
+way/151967297-1-380,380,DE170-380,way/42097854-380,11.67733,Unknown (may be duplicate path or parallel circuit)
+merged_way/31333769-1-380+8,380,DE144-380,way/22767509-380,10.68237,Unknown (may be duplicate path or parallel circuit)
+way/128478125-1-380,380,DE172-380,way/151967291-380,10.56665,Unknown (may be duplicate path or parallel circuit)
+relation/14514424-380-b,380,way/150200540-380,way/114319248-380,10.44284,Unknown (may be duplicate path or parallel circuit)
+way/844075807-1-380,380,way/844075808-380,DE54-380,9.7432,No nearby JAO lines
+relation/5603846-380,380,way/88901626-380,way/88916034-380,9.685540000000001,Unknown (may be duplicate path or parallel circuit)
+relation/14510979-380,380,way/58429825-380,way/30164703-380,9.53137,Unknown (may be duplicate path or parallel circuit)
+relation/14510980-380,380,way/58429825-380,way/30164703-380,9.53137,Unknown (may be duplicate path or parallel circuit)
+relation/14617003-380-a,380,way/442199284-380,DE119-380,8.23241,Unknown (may be duplicate path or parallel circuit)
+relation/3707291-380-a,380,way/442199284-380,DE119-380,8.23241,Unknown (may be duplicate path or parallel circuit)
+relation/14488153-380,380,way/149256409-380,way/25746125-380,8.07068,Unknown (may be duplicate path or parallel circuit)
+relation/3739955-380,380,way/149256409-380,way/25746125-380,8.07068,Unknown (may be duplicate path or parallel circuit)
+merged_way/41374780-1-380+3,380,DE125-380,way/27919734-380,7.73651,Unknown (may be duplicate path or parallel circuit)
+relation/1636750-380,380,DE5-380,way/32063539-380,7.31651,Unknown (may be duplicate path or parallel circuit)
+relation/12479461-380-b,380,DE96-380,way/24667346-380,7.2278199999999995,Unknown (may be duplicate path or parallel circuit)
+relation/12479462-380-b,380,DE96-380,way/24667346-380,7.2278199999999995,Unknown (may be duplicate path or parallel circuit)
+relation/3782492-380,380,way/88916034-380,way/202865177-380,7.17561,Unknown (may be duplicate path or parallel circuit)
+relation/3782493-380,380,way/88916034-380,way/202865177-380,7.17561,Unknown (may be duplicate path or parallel circuit)
+relation/5581798-380-a,380,way/941198517-380,DE58-380,6.88003,Unknown (may be duplicate path or parallel circuit)
+relation/5581803-380-a,380,way/941198517-380,DE58-380,6.88003,Unknown (may be duplicate path or parallel circuit)
+way/24415006-380,380,way/157628351-380,DE65-380,6.86739,Unknown (may be duplicate path or parallel circuit)
+relation/5581799-380-a,380,way/941198517-380,DE58-380,6.69075,Unknown (may be duplicate path or parallel circuit)
+relation/5581801-380-a,380,way/941198517-380,DE58-380,6.69075,Unknown (may be duplicate path or parallel circuit)
+way/1311473763-380,380,way/943135226-380,DE142-380,6.61703,Unknown (may be duplicate path or parallel circuit)
+relation/5581800-380-a,380,way/941198517-380,DE58-380,6.59145,Unknown (may be duplicate path or parallel circuit)
+relation/5581802-380-a,380,way/941198517-380,DE58-380,6.59145,Unknown (may be duplicate path or parallel circuit)
+relation/2927599-380-a,380,way/157806991-380,DE99-380,6.42783,Unknown (may be duplicate path or parallel circuit)
+relation/2927600-380-a,380,way/157806991-380,DE99-380,6.42783,Unknown (may be duplicate path or parallel circuit)
+relation/2927597-380,380,way/157806991-380,DE99-380,5.97409,Unknown (may be duplicate path or parallel circuit)
+relation/2927598-380,380,way/157806991-380,DE99-380,5.97409,Unknown (may be duplicate path or parallel circuit)
+relation/1659072-380,380,way/121199242-380,way/425100082-380,5.90325,Unknown (may be duplicate path or parallel circuit)
+way/1241983642-1-380,380,DE157-380,way/93341407-380,5.85962,Unknown (may be duplicate path or parallel circuit)
+merged_way/908473140-380+1,380,DE147-380,way/152403632-380,5.76117,Unknown (may be duplicate path or parallel circuit)
+way/844126090-380,380,way/311444691-380,way/799361667-380,5.6097399999999995,No nearby JAO lines
+relation/3862869-380,380,way/24604789-380,way/202164315-380,5.35996,Unknown (may be duplicate path or parallel circuit)
+relation/12006830-380,380,way/31024391-380,way/1134105414-380,5.18417,Unknown (may be duplicate path or parallel circuit)
+relation/1109593-380-b,380,DE69-380,DE75-380,4.88621,Unknown (may be duplicate path or parallel circuit)
+relation/1109599-380-b,380,DE69-380,DE75-380,4.88621,Unknown (may be duplicate path or parallel circuit)
+relation/14595857-380-c,380,DE161-380,DE162-380,4.88054,Unknown (may be duplicate path or parallel circuit)
+merged_way/284925905-380+1,380,DE75-380,DE69-380,4.86608,Unknown (may be duplicate path or parallel circuit)
+merged_way/364135875-380+4,380,way/22761692-380,way/22761839-380,4.85097,Unknown (may be duplicate path or parallel circuit)
+way/157332865-380,380,DE149-380,way/36183042-380,4.58015,No nearby JAO lines
+way/41374777-380,380,DE127-380,way/24839976-380,4.44552,Unknown (may be duplicate path or parallel circuit)
+merged_way/41374778-1-380+2,380,DE127-380,way/24839976-380,4.405279999999999,Unknown (may be duplicate path or parallel circuit)
+relation/1084358-380,380,way/870598507-380,way/26593935-380,4.36728,Unknown (may be duplicate path or parallel circuit)
+relation/11518116-380,380,way/29713902-380,DE103-380,4.232609999999999,Unknown (may be duplicate path or parallel circuit)
+relation/11518117-380,380,way/29713902-380,DE103-380,4.232609999999999,Unknown (may be duplicate path or parallel circuit)
+way/40895968-380,380,way/942448206-380,DE27-380,3.9923,Unknown (may be duplicate path or parallel circuit)
+way/1130668503-1-380,380,way/89043564-380,DE140-380,3.92333,Unknown (may be duplicate path or parallel circuit)
+relation/5497488-380-b,380,DE14-380,DE13-380,3.8512199999999996,Unknown (may be duplicate path or parallel circuit)
+relation/5497490-380-b,380,DE14-380,DE13-380,3.8512199999999996,Unknown (may be duplicate path or parallel circuit)
+merged_relation/3693986-380-g+4,380,way/41334805-380,way/147878692-380,3.68391,Unknown (may be duplicate path or parallel circuit)
+way/148211531-380-b,380,DE134-380,way/148211527-380,3.6225500000000004,No nearby JAO lines
+way/33812397-380,380,way/871646309-380,way/24493551-380,3.58387,Unknown (may be duplicate path or parallel circuit)
+merged_way/25090745-380+1,380,way/1303270458-380,way/23022100-380,3.52388,Unknown (may be duplicate path or parallel circuit)
+way/157807786-380,380,way/714098678-380,way/442199284-380,3.48781,Unknown (may be duplicate path or parallel circuit)
+way/290288900-380,380,way/311444692-380,way/311444691-380,3.45212,No nearby JAO lines
+relation/12479461-380-a,380,way/22964137-380,DE96-380,3.41426,Unknown (may be duplicate path or parallel circuit)
+merged_way/906381479-1-380+1,380,way/24462426-380,DE67-380,3.41384,Unknown (may be duplicate path or parallel circuit)
+way/141161434-380,380,DE125-380,DE127-380,3.35563,No nearby JAO lines
+merged_way/151689335-1-380+1,380,DE94-380,way/42797575-380,3.17246,Unknown (may be duplicate path or parallel circuit)
+way/844126089-380,380,way/799361667-380,way/844075808-380,3.15169,No nearby JAO lines
+way/844126085-380,380,way/799361667-380,way/844075808-380,3.14412,No nearby JAO lines
+way/844126088-380,380,way/799361667-380,way/844075808-380,3.13658,No nearby JAO lines
+way/844126084-380,380,way/799361667-380,way/844075808-380,3.12659,No nearby JAO lines
+merged_way/74003877-380+1,380,DE27-380,way/942448206-380,2.69604,Unknown (may be duplicate path or parallel circuit)
+way/1186186271-380,380,DE13-380,DE14-380,2.6631199999999997,Unknown (may be duplicate path or parallel circuit)
+merged_way/109507318-1-380+2,380,DE80-380,way/1076001174-380,2.66133,Unknown (may be duplicate path or parallel circuit)
+way/41339399-1-380,380,way/95434457-380,DE125-380,2.65304,No nearby JAO lines
+way/1104699062-380,380,DE200-380,way/1093896544-380,2.44846,No nearby JAO lines
+relation/1109599-380-c,380,DE75-380,way/32472806-380,2.37279,Unknown (may be duplicate path or parallel circuit)
+way/1130668496-1-380,380,DE140-380,DE143-380,2.23345,Unknown (may be duplicate path or parallel circuit)
+merged_way/29472854-1-380+4,380,way/150200540-380,way/29472852-380,2.11006,Unknown (may be duplicate path or parallel circuit)
+relation/14595857-380-b,380,way/38661452-380,DE161-380,2.10081,Unknown (may be duplicate path or parallel circuit)
+merged_way/207488613-380+1,380,DE127-380,DE128-380,2.03708,No nearby JAO lines
+relation/1082953-380-a,380,way/25426571-380,DE141-380,1.92972,No nearby JAO lines
+relation/1633120-380,380,way/24413992-380,DE49-380,1.79406,Unknown (may be duplicate path or parallel circuit)
+way/31669070-380,380,way/883768277-380,way/883768276-380,1.69878,No nearby JAO lines
+way/908473137-1-380,380,DE148-380,DE147-380,1.6305399999999999,Unknown (may be duplicate path or parallel circuit)
+way/40854817-380,380,DE186-380,DE187-380,1.539,No nearby JAO lines
+way/318302077-380,380,DE11-380,way/24502420-380,1.53465,Unknown (may be duplicate path or parallel circuit)
+way/1002012656-380,380,way/951273401-380,way/871646309-380,1.41594,No nearby JAO lines
+merged_way/200460375-1-380+2,380,way/35954395-380,DE207-380,1.3105,Unknown (may be duplicate path or parallel circuit)
+way/1254852017-380,380,DE137-380,DE140-380,1.24756,Unknown (may be duplicate path or parallel circuit)
+relation/3697399-380-b,380,DE185-380,DE184-380,1.0446600000000001,No nearby JAO lines
+relation/10508903-225,225,way/129378915-225,way/90854143-225,15.62536,Non-standard voltage class; No nearby JAO lines
+merged_way/478868126-2-220+2,220,way/25306752-220,way/25786404-220,124.11883,"Long line, possible cross-border or in area not covered by JAO"
+relation/3945260-220,220,way/42050342-220,way/1327333163-220,104.85087,"Long line, possible cross-border or in area not covered by JAO"
+merged_way/30132577-2-220+3,220,way/26472665-220,way/27149550-220,104.01132000000001,"Long line, possible cross-border or in area not covered by JAO"
+relation/3866869-220,220,way/499165542-220,way/24705761-220,90.74392999999999,"Long line, possible cross-border or in area not covered by JAO"
+relation/3918229-220-b,220,way/31367940-220,way/102743264-220,78.31377,"Long line, possible cross-border or in area not covered by JAO"
+relation/2450379-220,220,way/114319248-220,way/33411203-220,61.51272,"Long line, possible cross-border or in area not covered by JAO"
+relation/1177425-220,220,way/946710698-220,way/1091984573-220,56.47569,"Long line, possible cross-border or in area not covered by JAO"
+relation/1177426-220,220,way/946710698-220,way/1091984573-220,56.47569,"Long line, possible cross-border or in area not covered by JAO"
+relation/240489-220,220,way/40621568-220,way/27149550-220,55.04198,"Long line, possible cross-border or in area not covered by JAO"
+relation/240490-220,220,way/40621568-220,way/27149550-220,55.04198,"Long line, possible cross-border or in area not covered by JAO"
+merged_way/128714149-1-220+4,220,DE166-220,way/149987048-220,54.21815,"Long line, possible cross-border or in area not covered by JAO"
+merged_way/111963058-3-220+7,220,way/42861703-220,DE39-220,42.03079,"Long line, possible cross-border or in area not covered by JAO"
+merged_way/38243743-2-220+6,220,DE100-220,DE122-220,41.758160000000004,"Long line, possible cross-border or in area not covered by JAO"
+relation/1636782-220,220,way/1094015892-220,way/32318130-220,41.47189,"Long line, possible cross-border or in area not covered by JAO"
+merged_way/200409374-220+3,220,DE180-220,way/1327333163-220,36.86588,"Long line, possible cross-border or in area not covered by JAO"
+relation/3861963-220,220,way/28956649-220,way/29417741-220,35.6562,"Long line, possible cross-border or in area not covered by JAO"
+merged_way/781632468-3-220+3,220,DE39-220,way/61918154-220,34.781330000000004,"Long line, possible cross-border or in area not covered by JAO"
+relation/3888200-220-a,220,way/957746797-220,way/28397771-220,34.32038,"Long line, possible cross-border or in area not covered by JAO"
+relation/12300322-220,220,way/156673637-220,way/167352587-220,32.18913,"Long line, possible cross-border or in area not covered by JAO"
+relation/3742238-220,220,way/156673637-220,way/167352587-220,32.18913,"Long line, possible cross-border or in area not covered by JAO"
+merged_way/41981234-220+2,220,way/147521567-220,way/160929097-220,31.43386,"Long line, possible cross-border or in area not covered by JAO"
+relation/3730414-220,220,way/173112252-220,way/943135226-220,30.18156,"Long line, possible cross-border or in area not covered by JAO"
+relation/4815174-220,220,way/173112252-220,way/943135226-220,30.18156,"Long line, possible cross-border or in area not covered by JAO"
+merged_way/971780154-1-220-b+1,220,way/26472665-220,DE29-220,29.61388,"Long line, possible cross-border or in area not covered by JAO"
+merged_way/40162573-1-220+4,220,DE39-220,way/29472852-220,27.74487,"Long line, possible cross-border or in area not covered by JAO"
+relation/10492657-220-b,220,way/23161029-220,way/32843531-220,27.71257,"Long line, possible cross-border or in area not covered by JAO"
+relation/3739951-220-b,220,way/23161029-220,way/32843531-220,27.71257,"Long line, possible cross-border or in area not covered by JAO"
+merged_way/146086014-220+2,220,way/169244940-220,way/23284340-220,27.51192,"Long line, possible cross-border or in area not covered by JAO"
+relation/3862874-220-b,220,way/23816140-220,way/274621059-220,26.49456,"Long line, possible cross-border or in area not covered by JAO"
+merged_way/145129281-2-220+2,220,DE180-220,way/143903369-220,25.53007,"Long line, possible cross-border or in area not covered by JAO"
+relation/1605949-220,220,way/24667346-220,way/83916207-220,22.26047,"Long line, possible cross-border or in area not covered by JAO"
+merged_way/51370887-220+6,220,DE22-220,DE21-220,22.102,"Long line, possible cross-border or in area not covered by JAO"
+relation/272729-220-b,220,way/32725957-220,way/32966636-220,21.872130000000002,"Long line, possible cross-border or in area not covered by JAO"
+merged_way/41981221-1-220+4,220,way/147521567-220,way/1223405794-220,21.52777,"Long line, possible cross-border or in area not covered by JAO"
+merged_way/231741801-2-220+1,220,DE179-220,way/1327333163-220,21.02892,"Long line, possible cross-border or in area not covered by JAO"
+relation/13073144-220,220,DE47-220,way/26472665-220,20.62304,"Long line, possible cross-border or in area not covered by JAO"
+relation/3803496-220-b,220,way/89176939-220,way/151967290-220,20.55878,"Long line, possible cross-border or in area not covered by JAO"
+relation/1167333-220,220,way/24462426-220,DE83-220,20.03362,"Long line, possible cross-border or in area not covered by JAO"
+merged_way/151967297-2-220+3,220,way/151967291-220,way/42097854-220,19.613919999999997,Unknown (may be duplicate path or parallel circuit)
+relation/3742237-220,220,way/943135226-220,way/1081302145-220,17.83949,Unknown (may be duplicate path or parallel circuit)
+relation/4713421-220,220,way/943135226-220,way/1081302145-220,17.83949,Unknown (may be duplicate path or parallel circuit)
+merged_way/143848416-220+1,220,way/152973139-220,DE176-220,16.32245,Unknown (may be duplicate path or parallel circuit)
+way/812676716-220-a,220,way/1086825107-220,DE151-220,15.74285,Unknown (may be duplicate path or parallel circuit)
+way/222638710-220-b,220,DE151-220,way/1086825107-220,15.66522,Unknown (may be duplicate path or parallel circuit)
+way/34942575-220,220,DE27-220,DE24-220,15.045200000000001,Unknown (may be duplicate path or parallel circuit)
+merged_way/189574879-220+2,220,way/25786404-220,way/41334805-220,14.84218,Unknown (may be duplicate path or parallel circuit)
+merged_way/153089338-220+2,220,way/152973139-220,way/160929097-220,13.887030000000001,Unknown (may be duplicate path or parallel circuit)
+merged_way/108388734-1-220+1,220,way/41389594-220,DE202-220,13.38096,Unknown (may be duplicate path or parallel circuit)
+relation/1636726-220,220,way/152924508-220,way/149987048-220,13.19934,Unknown (may be duplicate path or parallel circuit)
+relation/15751730-220,220,way/152924498-220,relation/17591073-220,12.29941,Unknown (may be duplicate path or parallel circuit)
+relation/3989160-220,220,way/152924498-220,relation/17591073-220,12.29941,Unknown (may be duplicate path or parallel circuit)
+relation/943999-220,220,way/27124619-220,DE4-220,11.808290000000001,Unknown (may be duplicate path or parallel circuit)
+merged_way/37826246-1-220+5,220,way/24267175-220,way/27919734-220,11.43553,Unknown (may be duplicate path or parallel circuit)
+merged_way/59584539-2-220+1,220,way/24839976-220,DE129-220,11.18969,Unknown (may be duplicate path or parallel circuit)
+way/760912582-1-220,220,DE42-220,DE38-220,9.983709999999999,No nearby JAO lines
+merged_way/106337111-1-220+1,220,DE166-220,DE171-220,9.36994,No nearby JAO lines
+way/812686808-220,220,way/152219167-220,DE151-220,8.62275,No nearby JAO lines
+way/34897791-2-220,220,DE138-220,way/22766160-220,8.5431,Unknown (may be duplicate path or parallel circuit)
+relation/1123975-220,220,DE92-220,way/24921206-220,8.50813,Unknown (may be duplicate path or parallel circuit)
+relation/1123976-220,220,DE92-220,way/24921206-220,8.43619,Unknown (may be duplicate path or parallel circuit)
+merged_way/29380943-220+3,220,way/113546939-220,way/63114179-220,8.0639,Unknown (may be duplicate path or parallel circuit)
+relation/17189385-220,220,way/27919734-220,way/49577401-220,7.79683,Unknown (may be duplicate path or parallel circuit)
+way/41374780-2-220,220,DE125-220,way/27919734-220,7.7447,Unknown (may be duplicate path or parallel circuit)
+way/971780154-1-220-a,220,way/33169401-220,DE29-220,7.68596,Unknown (may be duplicate path or parallel circuit)
+way/712379294-220,220,DE108-220,way/172997498-220,7.43819,Unknown (may be duplicate path or parallel circuit)
+merged_way/121199247-2-220+3,220,DE69-220,DE68-220,7.37952,Unknown (may be duplicate path or parallel circuit)
+way/1131127616-2-220,220,DE30-220,DE32-220,6.800800000000001,Unknown (may be duplicate path or parallel circuit)
+relation/3937928-220,220,way/25943440-220,DE63-220,6.49209,Unknown (may be duplicate path or parallel circuit)
+way/143901743-1-220,220,way/159326655-220,DE179-220,6.395449999999999,No nearby JAO lines
+relation/3866868-220,220,way/499165542-220,DE163-220,6.34809,Unknown (may be duplicate path or parallel circuit)
+way/349635742-220,220,DE176-220,DE180-220,6.058590000000001,Unknown (may be duplicate path or parallel circuit)
+merged_way/105572022-2-220+6,220,DE87-220,DE80-220,5.99754,Unknown (may be duplicate path or parallel circuit)
+merged_way/155496642-1-220+1,220,way/35818137-220,way/24478889-220,5.89553,Unknown (may be duplicate path or parallel circuit)
+way/92913327-2-220,220,way/207756597-220,way/54359256-220,5.67815,Unknown (may be duplicate path or parallel circuit)
+relation/1225767-220-a,220,way/92024105-220,way/91854336-220,5.527189999999999,Unknown (may be duplicate path or parallel circuit)
+way/152924506-220,220,DE174-220,way/152924508-220,5.5182,Unknown (may be duplicate path or parallel circuit)
+merged_way/61733762-2-220+2,220,DE89-220,DE86-220,5.179180000000001,Unknown (may be duplicate path or parallel circuit)
+relation/2147236-220-b,220,way/154869247-220,way/395847307-220,5.00542,Unknown (may be duplicate path or parallel circuit)
+merged_way/79174511-2-220+4,220,DE93-220,way/23380800-220,4.82995,Unknown (may be duplicate path or parallel circuit)
+way/284698723-220,220,way/24667346-220,way/698870101-220,4.56708,Unknown (may be duplicate path or parallel circuit)
+way/169244947-220,220,way/169244940-220,way/23641079-220,4.359520000000001,Unknown (may be duplicate path or parallel circuit)
+merged_way/87106532-220+5,220,DE100-220,way/63114179-220,4.1408000000000005,Unknown (may be duplicate path or parallel circuit)
+merged_way/60869542-2-220+1,220,way/113546939-220,DE100-220,4.1035200000000005,Unknown (may be duplicate path or parallel circuit)
+way/257482750-220,220,DE23-220,way/940636813-220,3.82934,Unknown (may be duplicate path or parallel circuit)
+merged_way/109195942-1-220+2,220,way/24839976-220,DE131-220,3.76113,Unknown (may be duplicate path or parallel circuit)
+merged_way/191254576-220+2,220,way/24267175-220,DE125-220,3.73227,No nearby JAO lines
+way/243380065-220,220,way/28227099-220,way/97857512-220,3.65802,Unknown (may be duplicate path or parallel circuit)
+merged_way/42920875-2-220+2,220,way/1303270458-220,way/23022100-220,3.60944,Unknown (may be duplicate path or parallel circuit)
+relation/1109616-220,220,way/24921206-220,way/150267232-220,3.43115,Unknown (may be duplicate path or parallel circuit)
+relation/1109619-220,220,way/24921206-220,way/150267232-220,3.43115,Unknown (may be duplicate path or parallel circuit)
+way/145129282-220,220,way/207248812-220,way/156676050-220,3.2388600000000003,Unknown (may be duplicate path or parallel circuit)
+relation/1641722-220,220,way/23641079-220,DE160-220,3.23791,Unknown (may be duplicate path or parallel circuit)
+merged_way/107686849-220+1,220,DE81-220,DE82-220,3.00686,No nearby JAO lines
+way/1293441403-220,220,DE204-220,DE206-220,2.93106,Unknown (may be duplicate path or parallel circuit)
+way/32950166-2-220,220,DE22-220,DE23-220,2.86031,Unknown (may be duplicate path or parallel circuit)
+way/33548105-1-220,220,way/37764852-220,DE38-220,2.84958,Unknown (may be duplicate path or parallel circuit)
+way/24840438-2-220,220,way/24839976-220,way/188276460-220,2.78517,Unknown (may be duplicate path or parallel circuit)
+merged_way/24841695-220+1,220,way/24839976-220,way/188276460-220,2.7770799999999998,Unknown (may be duplicate path or parallel circuit)
+way/22762380-220,220,way/1118059105-220,DE126-220,2.6705799999999997,No nearby JAO lines
+merged_way/109507318-2-220+1,220,DE80-220,way/1076001174-220,2.6554,Unknown (may be duplicate path or parallel circuit)
+merged_way/66676884-2-220+1,220,way/1076001174-220,DE80-220,2.6459699999999997,Unknown (may be duplicate path or parallel circuit)
+way/41339399-2-220,220,way/95434457-220,DE125-220,2.63058,No nearby JAO lines
+way/1222462381-1-220,220,way/942448206-220,DE27-220,2.5760500000000004,Unknown (may be duplicate path or parallel circuit)
+merged_way/143901793-1-220+1,220,DE179-220,way/143903369-220,2.5117399999999996,Unknown (may be duplicate path or parallel circuit)
+way/1216922903-220,220,way/953757608-220,DE40-220,2.4178699999999997,No nearby JAO lines
+way/38584672-220,220,way/1303270458-220,way/38584673-220,2.30111,Unknown (may be duplicate path or parallel circuit)
+merged_way/856077610-2-220+3,220,DE126-220,way/22761839-220,2.13953,Unknown (may be duplicate path or parallel circuit)
+merged_way/71503500-1-220+1,220,DE82-220,DE84-220,2.12123,No nearby JAO lines
+merged_way/259468200-2-220+1,220,way/59707532-220,DE18-220,2.11059,Unknown (may be duplicate path or parallel circuit)
+way/42920726-1-220,220,DE80-220,DE81-220,1.72188,Unknown (may be duplicate path or parallel circuit)
+merged_way/241626236-220+2,220,DE64-220,way/42507488-220,1.61331,Unknown (may be duplicate path or parallel circuit)
+way/92877623-220,220,DE106-220,way/92877635-220,1.55907,Unknown (may be duplicate path or parallel circuit)
+merged_way/108526478-2-220+2,220,way/85523877-220,DE205-220,1.5198699999999998,Unknown (may be duplicate path or parallel circuit)
+way/231965957-220,220,DE43-220,way/28227099-220,1.3287200000000001,Unknown (may be duplicate path or parallel circuit)
+way/70691555-1-220,220,DE84-220,DE86-220,1.30616,Unknown (may be duplicate path or parallel circuit)
+merged_way/998005837-2-220+1,220,DE23-220,DE24-220,1.2740799999999999,No nearby JAO lines
