@@ -24,6 +24,8 @@ from grid_matcher.io.exporters import (
 )
 from grid_matcher.visualization.maps import create_jao_pypsa_visualization
 from grid_matcher.visualization.reports import create_enhanced_summary_table
+from grid_matcher.visualization.length_comparison import compare_line_lengths
+from grid_matcher.visualization.grid_comparisons import generate_grid_comparisons
 
 
 # Parse command-line arguments
@@ -40,6 +42,9 @@ def parse_arguments():
 
     # Visualization options
     parser.add_argument("--no-viz", action="store_true", help="Skip parameter visualization")
+    parser.add_argument("--no-length-comparison", action="store_true", help="Skip line length comparison")
+    parser.add_argument("--grid-comparison", action="store_true", help="Generate grid comparison visualizations")
+    parser.add_argument("--no-grid-comparison", action="store_true", help="Skip grid comparison visualizations")
 
     # Verbosity option
     parser.add_argument("--quiet", action="store_true", help="Disable verbose output")
@@ -62,11 +67,13 @@ INCLUDE_DC_IN_MATCHING = False
 INCLUDE_110KV_IN_MATCHING = False
 
 # Control whether to include DC and 110kV in the enhanced output
-INCLUDE_DC_IN_OUTPUT = True  # Set to False to exclude DC links from final output
-INCLUDE_110KV_IN_OUTPUT = True  # Set to False to exclude 110kV lines from final output
+INCLUDE_DC_IN_OUTPUT = False  # Set to False to exclude DC links from final output
+INCLUDE_110KV_IN_OUTPUT = False  # Set to False to exclude 110kV lines from final output
 
 # Control whether to generate parameter comparison visualization
 GENERATE_PARAMETER_VISUALIZATION = True
+GENERATE_LENGTH_COMPARISON = True
+GENERATE_GRID_COMPARISON = True
 
 # Control manual matching options
 ENABLE_MANUAL_MATCHING = True
@@ -443,7 +450,7 @@ def main():
     # Make configuration variables global so we can modify them
     global INCLUDE_DC_IN_MATCHING, INCLUDE_110KV_IN_MATCHING
     global INCLUDE_DC_IN_OUTPUT, INCLUDE_110KV_IN_OUTPUT
-    global GENERATE_PARAMETER_VISUALIZATION, VERBOSE
+    global GENERATE_PARAMETER_VISUALIZATION, GENERATE_LENGTH_COMPARISON, GENERATE_GRID_COMPARISON, VERBOSE
     global ENABLE_MANUAL_MATCHING, ADD_PREDEFINED_MATCHES, IMPORT_NEW_LINES
 
     # Parse command-line arguments
@@ -462,6 +469,7 @@ def main():
 
     # Override visualization option if specified
     GENERATE_PARAMETER_VISUALIZATION = not args.no_viz
+    GENERATE_LENGTH_COMPARISON = not args.no_length_comparison
 
     # Override verbosity option if specified
     VERBOSE = not args.quiet
@@ -475,6 +483,12 @@ def main():
         ADD_PREDEFINED_MATCHES = args.add_predefined
     if args.no_predefined:
         ADD_PREDEFINED_MATCHES = False
+
+    # Update your argument processing
+    if args.grid_comparison:
+        GENERATE_GRID_COMPARISON = True
+    if args.no_grid_comparison:
+        GENERATE_GRID_COMPARISON = False
 
     # This flag doesn't have the None default treatment
     IMPORT_NEW_LINES = args.import_new_lines
@@ -637,6 +651,37 @@ def main():
                 print("Parameter comparison visualization could not be generated")
         except Exception as e:
             print(f"Error generating parameter comparison visualization: {e}")
+            import traceback
+            traceback.print_exc()
+
+    if GENERATE_LENGTH_COMPARISON and enhanced_pypsa_gdf is not None and jao_gdf is not None:
+        print("\n===== GENERATING LINE LENGTH COMPARISON =====")
+        try:
+            length_comparison = compare_line_lengths(
+                jao_gdf,
+                enhanced_pypsa_gdf,
+                matching_results=results,
+                output_dir=OUTPUT_DIR
+            )
+            print(f"Line length comparison visualization saved to: {length_comparison['html_report']}")
+        except Exception as e:
+            print(f"Error generating line length comparison: {e}")
+            import traceback
+            traceback.print_exc()
+
+    if GENERATE_GRID_COMPARISON and enhanced_pypsa_gdf is not None and jao_gdf is not None:
+        print("\n===== GENERATING GRID COMPARISON VISUALIZATIONS =====")
+        try:
+            # Generate all comparison visualizations
+            grid_comparisons = generate_grid_comparisons(
+                jao_gdf,
+                enhanced_pypsa_gdf,
+                output_dir=OUTPUT_DIR
+            )
+            print(f"Grid comparison visualizations saved to: {grid_comparisons['html']}")
+
+        except Exception as e:
+            print(f"Error generating grid comparison visualizations: {e}")
             import traceback
             traceback.print_exc()
 

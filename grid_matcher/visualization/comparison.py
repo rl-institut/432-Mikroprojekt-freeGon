@@ -1165,3 +1165,4 @@ def visualize_parameter_comparison(matching_results, pypsa_gdf, output_dir="outp
 
     print(f"Parameter comparison visualization saved to {output_file}")
     return str(output_file)
+
