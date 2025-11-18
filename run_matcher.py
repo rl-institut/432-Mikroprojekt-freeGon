@@ -3,6 +3,7 @@
 
 import os
 import sys
+import random
 import re
 import pandas as pd
 import geopandas as gpd
@@ -273,9 +274,183 @@ def parse_110kv_links_direct(filepath):
         return []
 
 
+def update_pypsa_with_jao_data(pypsa_path, jao_path, output_dir):
+    """
+    Update PyPSA electrical parameters with values from JAO data.
+
+    Parameters:
+    -----------
+    pypsa_path : Path or str
+        Path to the PyPSA CSV file with EIC codes
+    jao_path : Path or str
+        Path to the JAO CSV file with PyPSA matches
+    output_dir : Path or str
+        Directory to save updated files
+
+    Returns:
+    --------
+    Path
+        Path to the updated PyPSA file
+    """
+    print("\n===== UPDATING PYPSA WITH JAO ELECTRICAL PARAMETERS =====")
+
+    # Ensure output directory exists
+    output_dir = Path(output_dir)
+    output_dir.mkdir(exist_ok=True, parents=True)
+
+    # Print available files in output directory
+    csv_files = list(output_dir.glob("*.csv"))
+    print(f"Found {len(csv_files)} CSV files in {output_dir}")
+    for file in csv_files:
+        if "pypsa" in file.name.lower() and "eic" in file.name.lower():
+            print(f"Found PyPSA file: {file.name}")
+        if "jao" in file.name.lower() and "matches" in file.name.lower():
+            print(f"Found JAO file: {file.name}")
+
+    # Load data
+    pypsa_df = pd.read_csv(pypsa_path)
+    jao_df = pd.read_csv(jao_path)
+
+    print(f"PyPSA data: {len(pypsa_df)} rows")
+    print(f"JAO data: {len(jao_df)} rows")
+
+    # Print column names for debugging
+    print(f"PyPSA columns: {list(pypsa_df.columns)}")
+    print(f"JAO columns: {list(jao_df.columns)}")
+
+    # Track changed parameters for reporting
+    changed_params = []
+
+    # Update PyPSA parameters from JAO data
+    for _, jao_row in jao_df.iterrows():
+        if not pd.isna(jao_row.get('pypsa_ids')) and jao_row.get('matched', False):
+            # Split in case there are multiple IDs separated by comma or similar
+            pypsa_ids = [id.strip() for id in str(jao_row['pypsa_ids']).split(',')]
+
+            for pypsa_id in pypsa_ids:
+                # First try with line_id
+                matching_rows = pypsa_df[pypsa_df['line_id'] == pypsa_id]
+
+                # If no match, try with id column
+                if matching_rows.empty:
+                    matching_rows = pypsa_df[pypsa_df['id'] == pypsa_id]
+
+                if not matching_rows.empty:
+                    # Process each matching PyPSA row with JAO data
+                    for idx, pypsa_row in matching_rows.iterrows():
+                        changes = {}
+
+                        # Map of PyPSA parameters to JAO parameters - ONLY include r, x, and b
+                        param_map = {
+                            'r': 'jao_r',
+                            'x': 'jao_x',
+                            'b': 'jao_b'
+                        }
+
+                        # Try to update each parameter
+                        for pypsa_param, jao_param in param_map.items():
+                            # Skip if JAO parameter doesn't exist or is NaN
+                            if jao_param not in jao_row or pd.isna(jao_row[jao_param]):
+                                continue
+
+                            # Skip if PyPSA parameter doesn't exist
+                            if pypsa_param not in pypsa_df.columns:
+                                continue
+
+                            # Get current and new values
+                            original_val = pypsa_df.at[idx, pypsa_param]
+                            updated_val = jao_row[jao_param]
+
+                            # Check if we need to update (with tolerance for float comparison)
+                            if pd.isna(original_val) or pd.isna(updated_val):
+                                # Handle NaN values
+                                if pd.isna(original_val) and not pd.isna(updated_val):
+                                    # Update NaN to a value
+                                    pypsa_df.at[idx, pypsa_param] = updated_val
+                                    changes[pypsa_param] = {
+                                        'original': 'NaN',
+                                        'updated': updated_val
+                                    }
+                            elif isinstance(original_val, (int, float)) and isinstance(updated_val, (int, float)):
+                                # Numeric comparison with tolerance
+                                if abs(float(original_val) - float(updated_val)) > 1e-6:
+                                    pypsa_df.at[idx, pypsa_param] = updated_val
+                                    changes[pypsa_param] = {
+                                        'original': original_val,
+                                        'updated': updated_val
+                                    }
+                            else:
+                                # String or other type comparison
+                                if str(original_val) != str(updated_val):
+                                    pypsa_df.at[idx, pypsa_param] = updated_val
+                                    changes[pypsa_param] = {
+                                        'original': original_val,
+                                        'updated': updated_val
+                                    }
+
+                        # Record changes if any were made
+                        if changes:
+                            changed_params.append({
+                                'id': pypsa_id,
+                                'changes': changes
+                            })
+
+    # Save updated PyPSA data
+    output_file = output_dir / "pypsa_with_jao_params.csv"
+    pypsa_df.to_csv(output_file, index=False)
+    print(f"Updated PyPSA data saved to: {output_file}")
+
+    # Generate comparison report
+    if changed_params:
+        comparison_str = f"Updated {len(changed_params)} PyPSA lines with JAO parameters\n\n"
+
+        # Print sample of changes
+        sample_size = min(10, len(changed_params))
+        import random
+        samples = random.sample(changed_params, sample_size)
+
+        comparison_str += f"Comparing {sample_size} randomly selected lines with updated parameters:\n"
+        comparison_str += "=" * 80 + "\n"
+
+        for change in samples:
+            line_id = change['id']
+            comparison_str += f"\nLine ID: {line_id}\n"
+            comparison_str += f"{'Parameter':<12}| {'Original':<22} | {'Updated':<22} | {'Changed'}\n"
+            comparison_str += f"{'-' * 12}|{'-' * 24}|{'-' * 24}|{'-' * 8}\n"
+
+            for param, values in change['changes'].items():
+                original = values['original']
+                updated = values['updated']
+                comparison_str += f"{param:<12}| {original:<22} | {updated:<22} | Yes\n"
+
+        # Print to console
+        print(comparison_str)
+
+        # Save comparison to file
+        comparison_file = output_dir / "parameter_comparison.txt"
+        with open(comparison_file, 'w') as f:
+            f.write(comparison_str)
+        print(f"Parameter comparison saved to: {comparison_file}")
+
+        # Also save the list of all changed lines
+        changed_lines_file = output_dir / "changed_lines.csv"
+        changed_ids = [item['id'] for item in changed_params]
+        pd.DataFrame({'changed_line_id': changed_ids}).to_csv(changed_lines_file, index=False)
+        print(f"List of all changed lines saved to: {changed_lines_file}")
+    else:
+        print("No parameters were updated.")
+
+    return output_file
+
+
 def append_to_csv_export(output_dir, dc_links=None, links_110kv=None, include_dc=True, include_110kv=True):
     """Append DC and 110kV data to the output CSV file."""
-    pypsa_csv_path = output_dir / "pypsa_with_eic.csv"
+    # Try to use the enhanced file first, fall back to the original
+    pypsa_enhanced_path = output_dir / "pypsa_with_eic_enhanced.csv"
+    pypsa_original_path = output_dir / "pypsa_with_eic.csv"
+
+    pypsa_csv_path = pypsa_enhanced_path if os.path.exists(pypsa_enhanced_path) else pypsa_original_path
+
     if not os.path.exists(pypsa_csv_path):
         print(f"PyPSA output file not found: {pypsa_csv_path}")
         return
@@ -390,7 +565,7 @@ def append_to_csv_export(output_dir, dc_links=None, links_110kv=None, include_dc
             # Merge with original and save
             merged_df = pd.concat([pypsa_df, additional_df], ignore_index=True)
 
-            new_path = output_dir / "pypsa_with_eic_enhanced.csv"
+            new_path = output_dir / "pypsa_with_eic_enhanced_complete.csv"
             merged_df.to_csv(new_path, index=False)
 
             print(f"Added {len(additional_records)} rows to output CSV file")
@@ -402,7 +577,7 @@ def append_to_csv_export(output_dir, dc_links=None, links_110kv=None, include_dc
             print("No additional data to append to CSV")
             # If no records added but we still want to save a copy of the original file
             if dc_links or links_110kv:
-                new_path = output_dir / "pypsa_with_eic_enhanced.csv"
+                new_path = output_dir / "pypsa_with_eic_enhanced_complete.csv"
                 pypsa_df.to_csv(new_path, index=False)
                 print(f"Copied original data to: {new_path}")
 
@@ -581,6 +756,17 @@ def main():
     else:
         print("110kV links already included in matching or file not found")
 
+    # Determine the correct file paths
+    pypsa_eic_file = OUTPUT_DIR / "pypsa_with_eic.csv"
+    jao_matches_file = OUTPUT_DIR / "jao_pypsa_matches.csv"
+
+    # Call the function with all three required arguments
+    updated_pypsa_df = update_pypsa_with_jao_data(
+        pypsa_eic_file,  # PyPSA file with EIC codes
+        jao_matches_file,  # JAO file with PyPSA matches
+        OUTPUT_DIR  # Output directory
+    )
+
     # Add to output CSV
     print("\n===== ADDING ADDITIONAL DATA TO OUTPUT =====")
     enhanced_pypsa_gdf = append_to_csv_export(
@@ -590,6 +776,7 @@ def main():
         include_dc=INCLUDE_DC_IN_OUTPUT,
         include_110kv=INCLUDE_110KV_IN_OUTPUT
     )
+
 
     # Generate parameter comparison visualization if requested
     if GENERATE_PARAMETER_VISUALIZATION and enhanced_pypsa_gdf is not None:
