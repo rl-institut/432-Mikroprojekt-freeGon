@@ -760,15 +760,20 @@ def main():
     pypsa_eic_file = OUTPUT_DIR / "pypsa_with_eic.csv"
     jao_matches_file = OUTPUT_DIR / "jao_pypsa_matches.csv"
 
-    # Call the function with all three required arguments
-    updated_pypsa_df = update_pypsa_with_jao_data(
-        pypsa_eic_file,  # PyPSA file with EIC codes
-        jao_matches_file,  # JAO file with PyPSA matches
-        OUTPUT_DIR  # Output directory
+    # After calling update_pypsa_with_jao_data, rename the output file to be used by append_to_csv_export
+    updated_pypsa_file = update_pypsa_with_jao_data(
+        pypsa_eic_file,
+        jao_matches_file,
+        OUTPUT_DIR
     )
 
-    # Add to output CSV
-    print("\n===== ADDING ADDITIONAL DATA TO OUTPUT =====")
+    # Copy or rename the updated file to the expected path
+    import shutil
+    enhanced_path = OUTPUT_DIR / "pypsa_with_eic_enhanced.csv"
+    shutil.copyfile(updated_pypsa_file, enhanced_path)
+    print(f"Copied updated parameters to: {enhanced_path}")
+
+    # Now call append_to_csv_export
     enhanced_pypsa_gdf = append_to_csv_export(
         OUTPUT_DIR,
         dc_links,
@@ -776,6 +781,7 @@ def main():
         include_dc=INCLUDE_DC_IN_OUTPUT,
         include_110kv=INCLUDE_110KV_IN_OUTPUT
     )
+
 
 
     # Generate parameter comparison visualization if requested
