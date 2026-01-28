@@ -10,6 +10,8 @@ import geopandas as gpd
 import argparse
 from pathlib import Path
 from shapely.geometry import LineString
+from shapely.geometry.point import Point
+
 from grid_matcher.matcher.original_matcher import run_original_matching, load_data
 from grid_matcher.visualization.comparison import visualize_parameter_comparison
 # Import functions from manual_matching.py
@@ -23,10 +25,16 @@ from grid_matcher.manual.manual_matching import (
 from grid_matcher.io.exporters import (
     create_results_csv, generate_pypsa_with_eic, generate_jao_with_pypsa
 )
-from grid_matcher.visualization.maps import create_jao_pypsa_visualization
+from grid_matcher.visualization.maps import create_jao_pypsa_visualization, save_dual_match_png
 from grid_matcher.visualization.reports import create_enhanced_summary_table
 from grid_matcher.visualization.length_comparison import compare_line_lengths
 from grid_matcher.visualization.grid_comparisons import generate_grid_comparisons
+from grid_matcher.matcher.match_transformers import run_transformer_matching_pipeline
+from grid_matcher.matcher.transformer_utils import create_updated_pypsa_with_jao_params
+from shapely import wkt
+from grid_matcher.matcher.match_transformers import create_lines_transformers_matched_map, _safe_wkt_load
+
+
 
 
 # Parse command-line arguments
@@ -60,6 +68,12 @@ def parse_arguments():
     # Output directory
     parser.add_argument("--output", "-o", type=str, help="Output directory", default="output/matcher")
 
+    # match transformers
+    parser.add_argument("--include-transformers", action="store_true", help="Include transformer matching")
+    parser.add_argument("--no-transformers", action="store_true", help="Skip transformer matching")
+    parser.add_argument("--transformers-distance", type=float, default=5.0,
+                        help="Distance threshold for transformer matching in km")
+
     return parser.parse_args()
 
 # ===== CONFIGURATION =====
@@ -80,6 +94,9 @@ GENERATE_GRID_COMPARISON = True
 ENABLE_MANUAL_MATCHING = True
 ADD_PREDEFINED_MATCHES = True
 IMPORT_NEW_LINES = False
+
+# Include transformers:
+INCLUDE_TRANSFORMER_MATCHING = True
 
 VERBOSE = True
 
@@ -620,101 +637,119 @@ def regenerate_outputs(results, jao_gdf, pypsa_gdf, output_dir):
 
     return pypsa_with_eic
 
+def _load_transformers_csv_as_gdf(path: Path) -> gpd.GeoDataFrame:
+    """
+    Read a transformer CSV with a WKT 'geometry' column (or lon/lat fallback)
+    and return a GeoDataFrame in EPSG:4326.
+    """
+    df = pd.read_csv(path)
+
+    # WKT geometry (preferred)
+    if "geometry" in df.columns:
+        df["geometry"] = df["geometry"].apply(
+            lambda s: wkt.loads(s) if isinstance(s, str) and s.strip() else None
+        )
+    # fallback: try lon/lat style columns
+    elif {"lon", "lat"}.issubset(df.columns):
+        df["geometry"] = df.apply(
+            lambda r: Point(float(r["lon"]), float(r["lat"])) if pd.notna(r["lon"]) and pd.notna(r["lat"]) else None,
+            axis=1
+        )
+    else:
+        # last resort: try x/y
+        if {"x", "y"}.issubset(df.columns):
+            df["geometry"] = df.apply(
+                lambda r: Point(float(r["x"]), float(r["y"])) if pd.notna(r["x"]) and pd.notna(r["y"]) else None,
+                axis=1
+            )
+        else:
+            df["geometry"] = None
+
+    gdf = gpd.GeoDataFrame(df, geometry="geometry", crs="EPSG:4326")
+    return gdf
+
+
 
 def main():
-    # Make configuration variables global so we can modify them
+    # ===== Global flags we may override via CLI =====
     global INCLUDE_DC_IN_MATCHING, INCLUDE_110KV_IN_MATCHING
     global INCLUDE_DC_IN_OUTPUT, INCLUDE_110KV_IN_OUTPUT
     global GENERATE_PARAMETER_VISUALIZATION, GENERATE_LENGTH_COMPARISON, GENERATE_GRID_COMPARISON, VERBOSE
     global ENABLE_MANUAL_MATCHING, ADD_PREDEFINED_MATCHES, IMPORT_NEW_LINES
+    global INCLUDE_TRANSFORMER_MATCHING
 
-    # Parse command-line arguments
+    # ----- Parse args & apply configuration -----
     args = parse_arguments()
-
-    # Set configuration from command-line arguments
     OUTPUT_DIR = Path(args.output)
 
-    # Override matching inclusion if specified in arguments
-    INCLUDE_DC_IN_MATCHING = args.include_dc_matching
-    INCLUDE_110KV_IN_MATCHING = args.include_110kv_matching
+    INCLUDE_DC_IN_MATCHING   = bool(args.include_dc_matching)
+    INCLUDE_110KV_IN_MATCHING = bool(args.include_110kv_matching)
 
-    # Override output inclusion if specified in arguments
-    INCLUDE_DC_IN_OUTPUT = not args.no_dc_output
-    INCLUDE_110KV_IN_OUTPUT = not args.no_110kv_output
+    INCLUDE_DC_IN_OUTPUT     = not args.no_dc_output
+    INCLUDE_110KV_IN_OUTPUT  = not args.no_110kv_output
 
-    # Override visualization option if specified
     GENERATE_PARAMETER_VISUALIZATION = not args.no_viz
-    GENERATE_LENGTH_COMPARISON = not args.no_length_comparison
+    GENERATE_LENGTH_COMPARISON       = not args.no_length_comparison
+    GENERATE_GRID_COMPARISON         = True if args.grid_comparison else (False if args.no_grid_comparison else GENERATE_GRID_COMPARISON)
 
-    # Override verbosity option if specified
     VERBOSE = not args.quiet
 
-    # Only override defaults if flags were explicitly set
     if args.manual is not None:
-        ENABLE_MANUAL_MATCHING = args.manual
+        ENABLE_MANUAL_MATCHING = bool(args.manual)
     if args.no_manual:
         ENABLE_MANUAL_MATCHING = False
     if args.add_predefined is not None:
-        ADD_PREDEFINED_MATCHES = args.add_predefined
+        ADD_PREDEFINED_MATCHES = bool(args.add_predefined)
     if args.no_predefined:
         ADD_PREDEFINED_MATCHES = False
 
-    # Update your argument processing
-    if args.grid_comparison:
-        GENERATE_GRID_COMPARISON = True
-    if args.no_grid_comparison:
-        GENERATE_GRID_COMPARISON = False
+    INCLUDE_TRANSFORMER_MATCHING = True if args.include_transformers else (False if args.no_transformers else INCLUDE_TRANSFORMER_MATCHING)
 
-    # This flag doesn't have the None default treatment
-    IMPORT_NEW_LINES = args.import_new_lines
+    IMPORT_NEW_LINES = bool(args.import_new_lines)
 
-    # Create output directory if it doesn't exist
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     print("===== GRID MATCHER matcher MODE =====")
-    print(f"Include DC links in matching: {INCLUDE_DC_IN_MATCHING}")
-    print(f"Include 110kV lines in matching: {INCLUDE_110KV_IN_MATCHING}")
-    print(f"Include DC links in output: {INCLUDE_DC_IN_OUTPUT}")
-    print(f"Include 110kV lines in output: {INCLUDE_110KV_IN_OUTPUT}")
-    print(f"Generate parameter visualization: {GENERATE_PARAMETER_VISUALIZATION}")
-    print(f"Enable manual matching: {ENABLE_MANUAL_MATCHING}")
-    print(f"Add predefined matches: {ADD_PREDEFINED_MATCHES}")
-    print(f"Import new lines: {IMPORT_NEW_LINES}")
-    print(f"Output directory: {OUTPUT_DIR}")
-    print(f"Verbose output: {VERBOSE}")
+    print(f"Include DC links in matching:      {INCLUDE_DC_IN_MATCHING}")
+    print(f"Include 110kV lines in matching:   {INCLUDE_110KV_IN_MATCHING}")
+    print(f"Include DC links in output:        {INCLUDE_DC_IN_OUTPUT}")
+    print(f"Include 110kV lines in output:     {INCLUDE_110KV_IN_OUTPUT}")
+    print(f"Generate parameter visualization:  {GENERATE_PARAMETER_VISUALIZATION}")
+    print(f"Generate length comparison:        {GENERATE_LENGTH_COMPARISON}")
+    print(f"Generate grid comparisons:         {GENERATE_GRID_COMPARISON}")
+    print(f"Enable manual matching:            {ENABLE_MANUAL_MATCHING}")
+    print(f"Add predefined matches:            {ADD_PREDEFINED_MATCHES}")
+    print(f"Import new lines:                  {IMPORT_NEW_LINES}")
+    print(f"Include transformer matching:      {INCLUDE_TRANSFORMER_MATCHING}")
+    print(f"Output directory:                  {OUTPUT_DIR}")
+    print(f"Verbose output:                    {VERBOSE}")
 
-    # Load main data
+    # ----- Load main line data -----
     print("\n===== LOADING MAIN DATA =====")
     jao_gdf, pypsa_gdf = load_data(JAO_PATH, PYPSA_PATH)
 
-    # Import new lines if enabled
     if IMPORT_NEW_LINES:
-        jao_gdf, pypsa_gdf = import_new_lines_from_csv(jao_gdf, pypsa_gdf, DATA_DIR)
+        try:
+            jao_gdf, pypsa_gdf = import_new_lines_from_csv(jao_gdf, pypsa_gdf, DATA_DIR)
+            print("Imported new lines from CSV.")
+        except Exception as e:
+            print(f"Warning: failed to import new lines: {e}")
 
-
-    # Apply predefined manual matches if enabled
+    # ----- Manual matches: load and (optionally) add predefined -----
     manual_matches = []
     if ENABLE_MANUAL_MATCHING:
-        # Load existing matches first
-        if os.path.exists(MANUAL_MATCHES_FILE):
-            manual_matches = load_manual_matches_file(MANUAL_MATCHES_FILE)
-            print(f"Loaded {len(manual_matches)} manual matches from {MANUAL_MATCHES_FILE}")
+        try:
+            if MANUAL_MATCHES_FILE.exists():
+                manual_matches = load_manual_matches_file(MANUAL_MATCHES_FILE)
+                print(f"Loaded {len(manual_matches)} manual matches from {MANUAL_MATCHES_FILE}")
+            if ADD_PREDEFINED_MATCHES:
+                manual_matches = add_predefined_manual_matches(jao_gdf, pypsa_gdf, manual_matches, interactive=False)
+                save_manual_matches_file(manual_matches, MANUAL_MATCHES_FILE)
+                print(f"Saved {len(manual_matches)} manual matches (after adding predefined).")
+        except Exception as e:
+            print(f"Warning: manual matching prep failed: {e}")
 
-        # Add predefined matches if enabled
-        if ADD_PREDEFINED_MATCHES:
-            manual_matches = add_predefined_manual_matches(jao_gdf, pypsa_gdf, manual_matches, interactive=False)
-            save_manual_matches_file(manual_matches, MANUAL_MATCHES_FILE)
-
-
-
-
-    # Load manual matches without interactive mode
-    elif ENABLE_MANUAL_MATCHING:
-        if os.path.exists(MANUAL_MATCHES_FILE):
-            manual_matches = load_manual_matches_file(MANUAL_MATCHES_FILE)
-            print(f"Loaded {len(manual_matches)} manual matches from {MANUAL_MATCHES_FILE}")
-
-    # Run matching with configurable DC and 110kV inclusion
+    # ----- Run automated matching (lines) -----
     results = run_original_matching(
         jao_gdf,
         pypsa_gdf,
@@ -725,160 +760,220 @@ def main():
         pypsa_dc_path=PYPSA_DC_PATH if INCLUDE_DC_IN_MATCHING else None,
         verbose=VERBOSE
     )
-
     print("\n===== MATCHING COMPLETE =====")
 
-    # Apply manual matches if enabled and we have matches
-    regenerate_needed = False
+    # ----- Apply manual matches and regenerate outputs if needed -----
     if ENABLE_MANUAL_MATCHING and manual_matches:
-        results = apply_manual_matches(results, jao_gdf, pypsa_gdf, manual_matches)
-        regenerate_needed = True
+        try:
+            results = apply_manual_matches(results, jao_gdf, pypsa_gdf, manual_matches)
+            _ = regenerate_outputs(results, jao_gdf, pypsa_gdf, OUTPUT_DIR)
+        except Exception as e:
+            print(f"Warning: applying/regenerating manual matches failed: {e}")
 
-    # If manual matches were applied, regenerate the output files
-    pypsa_with_eic = None
-    if regenerate_needed:
-        pypsa_with_eic = regenerate_outputs(results, jao_gdf, pypsa_gdf, OUTPUT_DIR)
-
-    # Extract DC and 110kV links using direct methods (if not included in matching)
+    # ----- DC / 110kV parsing (if not included in matching) -----
     print("\n===== PROCESSING ADDITIONAL DATA =====")
-
     dc_links = []
-    if os.path.exists(PYPSA_DC_PATH) and not INCLUDE_DC_IN_MATCHING:
-        dc_links = parse_dc_links_direct(PYPSA_DC_PATH)
-        print(f"Extracted {len(dc_links)} DC links")
-    else:
-        print("DC links already included in matching or file not found")
-
     links_110kv = []
-    if os.path.exists(PYPSA_110KV_PATH) and not INCLUDE_110KV_IN_MATCHING:
-        links_110kv = parse_110kv_links_direct(PYPSA_110KV_PATH)
-        print(f"Extracted {len(links_110kv)} 110kV links")
-    else:
-        print("110kV links already included in matching or file not found")
+    try:
+        if (not INCLUDE_DC_IN_MATCHING) and PYPSA_DC_PATH.exists():
+            dc_links = parse_dc_links_direct(PYPSA_DC_PATH)
+            print(f"Extracted {len(dc_links)} DC links")
+        else:
+            print("DC links already included in matching or file not found")
+    except Exception as e:
+        print(f"Warning: DC parsing failed: {e}")
 
-    # Determine the correct file paths
-    pypsa_eic_file = OUTPUT_DIR / "pypsa_with_eic.csv"
-    jao_matches_file = OUTPUT_DIR / "jao_pypsa_matches.csv"
+    try:
+        if (not INCLUDE_110KV_IN_MATCHING) and PYPSA_110KV_PATH.exists():
+            links_110kv = parse_110kv_links_direct(PYPSA_110KV_PATH)
+            print(f"Extracted {len(links_110kv)} 110kV links")
+        else:
+            print("110kV links already included in matching or file not found")
+    except Exception as e:
+        print(f"Warning: 110kV parsing failed: {e}")
 
-    # After calling update_pypsa_with_jao_data, rename the output file to be used by append_to_csv_export
-    updated_pypsa_file = update_pypsa_with_jao_data(
-        pypsa_eic_file,
-        jao_matches_file,
-        OUTPUT_DIR
-    )
+    # ----- Update PyPSA electrical params from JAO matches -----
+    pypsa_eic_file    = OUTPUT_DIR / "pypsa_with_eic.csv"
+    jao_matches_file  = OUTPUT_DIR / "jao_pypsa_matches.csv"
+    enhanced_path     = OUTPUT_DIR / "pypsa_with_eic_enhanced.csv"
 
-    # Copy or rename the updated file to the expected path
-    import shutil
-    enhanced_path = OUTPUT_DIR / "pypsa_with_eic_enhanced.csv"
-    shutil.copyfile(updated_pypsa_file, enhanced_path)
-    print(f"Copied updated parameters to: {enhanced_path}")
+    try:
+        updated_pypsa_file = update_pypsa_with_jao_data(pypsa_eic_file, jao_matches_file, OUTPUT_DIR)
+        # keep downstream code expecting this filename happy
+        import shutil
+        shutil.copyfile(updated_pypsa_file, enhanced_path)
+        print(f"Copied updated parameters to: {enhanced_path}")
+    except Exception as e:
+        print(f"Warning: updating PyPSA with JAO params failed: {e}")
 
-    # Now call append_to_csv_export
+    # ----- Append DC/110kV to export, get GeoDataFrame for visualizations -----
     enhanced_pypsa_gdf = append_to_csv_export(
         OUTPUT_DIR,
-        dc_links,
-        links_110kv,
+        dc_links=dc_links,
+        links_110kv=links_110kv,
         include_dc=INCLUDE_DC_IN_OUTPUT,
         include_110kv=INCLUDE_110KV_IN_OUTPUT
     )
 
+    png = save_dual_match_png(
+        jao_gdf,
+        enhanced_pypsa_gdf,  # must be a GeoDataFrame
+        results,  # not "matching_results"
+        out_path=OUTPUT_DIR / "jao_pypsa_map.png",
+    )
 
-
-    # Generate parameter comparison visualization if requested
+    # ----- Visualizations (parameter comparison / length / grid) -----
     if GENERATE_PARAMETER_VISUALIZATION and enhanced_pypsa_gdf is not None:
         print("\n===== GENERATING PARAMETER COMPARISON VISUALIZATION =====")
         try:
-            # Use the results directly from run_original_matching function
             if results:
-                print(f"Total matching results: {len(results)}")
-                matched_count = sum(1 for r in results if r.get("matched", False))
-                print(f"Matched results: {matched_count}")
+                # ensure GeoDataFrame
+                if isinstance(enhanced_pypsa_gdf, pd.DataFrame) and not isinstance(enhanced_pypsa_gdf, gpd.GeoDataFrame):
+                    if 'geometry' in enhanced_pypsa_gdf.columns:
+                        from shapely import wkt as _wkt
+                        enhanced_pypsa_gdf['geometry'] = enhanced_pypsa_gdf['geometry'].apply(
+                            lambda x: _wkt.loads(x) if isinstance(x, str) else x
+                        )
+                    enhanced_pypsa_gdf = gpd.GeoDataFrame(enhanced_pypsa_gdf, geometry='geometry', crs="EPSG:4326")
 
-                # Convert enhanced_pypsa_gdf to GeoDataFrame if needed
-                if isinstance(enhanced_pypsa_gdf, pd.DataFrame) and not isinstance(enhanced_pypsa_gdf,
-                                                                                   gpd.GeoDataFrame):
-                    try:
-                        if 'geometry' in enhanced_pypsa_gdf.columns:
-                            from shapely import wkt
-                            enhanced_pypsa_gdf['geometry'] = enhanced_pypsa_gdf['geometry'].apply(
-                                lambda x: wkt.loads(x) if isinstance(x, str) else x
-                            )
-                            enhanced_pypsa_gdf = gpd.GeoDataFrame(
-                                enhanced_pypsa_gdf,
-                                geometry='geometry',
-                                crs="EPSG:4326"
-                            )
-                    except Exception as e:
-                        print(f"Error converting to GeoDataFrame: {e}")
-
-                # Import the preparation function from comparison.py
                 from grid_matcher.visualization.comparison import prepare_visualization_data
+                enhanced_results = prepare_visualization_data(results, enhanced_pypsa_gdf, jao_gdf=jao_gdf)
+                viz_path = visualize_parameter_comparison(enhanced_results, enhanced_pypsa_gdf, output_dir=OUTPUT_DIR)
+                print(f"Parameter comparison visualization saved to: {viz_path}")
 
-                # Transform the data into the expected format
-                enhanced_results = prepare_visualization_data(
-                    results,
-                    enhanced_pypsa_gdf,
-                    jao_gdf=jao_gdf
-                )
-
-                # Create parameter comparison visualization
-                visualization_path = visualize_parameter_comparison(
-                    enhanced_results,
-                    enhanced_pypsa_gdf,
-                    output_dir=OUTPUT_DIR
-                )
-                print(f"Parameter comparison visualization saved to: {visualization_path}")
-
-                # ALSO create the parameter summary table
                 from grid_matcher.visualization.reports import create_enhanced_summary_table
-                summary_path = create_enhanced_summary_table(
-                    jao_gdf,
-                    enhanced_pypsa_gdf,
-                    results,
-                    output_dir=OUTPUT_DIR
-                )
+                summary_path = create_enhanced_summary_table(jao_gdf, enhanced_pypsa_gdf, results, output_dir=OUTPUT_DIR)
                 print(f"Parameter summary table saved to: {summary_path}")
-
             else:
-                print("No matching results available")
-                print("Parameter comparison visualization could not be generated")
+                print("No matching results available for visualization.")
         except Exception as e:
-            print(f"Error generating parameter comparison visualization: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"Warning: parameter visualization failed: {e}")
 
     if GENERATE_LENGTH_COMPARISON and enhanced_pypsa_gdf is not None and jao_gdf is not None:
         print("\n===== GENERATING LINE LENGTH COMPARISON =====")
         try:
             length_comparison = compare_line_lengths(
-                jao_gdf,
-                enhanced_pypsa_gdf,
-                matching_results=results,
-                output_dir=OUTPUT_DIR
+                jao_gdf, enhanced_pypsa_gdf, matching_results=results, output_dir=OUTPUT_DIR
             )
             print(f"Line length comparison visualization saved to: {length_comparison['html_report']}")
         except Exception as e:
-            print(f"Error generating line length comparison: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"Warning: line length comparison failed: {e}")
 
     if GENERATE_GRID_COMPARISON and enhanced_pypsa_gdf is not None and jao_gdf is not None:
         print("\n===== GENERATING GRID COMPARISON VISUALIZATIONS =====")
         try:
-            # Generate all comparison visualizations
-            grid_comparisons = generate_grid_comparisons(
-                jao_gdf,
-                enhanced_pypsa_gdf,
-                output_dir=OUTPUT_DIR
-            )
+            grid_comparisons = generate_grid_comparisons(jao_gdf, enhanced_pypsa_gdf, output_dir=OUTPUT_DIR)
             print(f"Grid comparison visualizations saved to: {grid_comparisons['html']}")
-
         except Exception as e:
-            print(f"Error generating grid comparison visualizations: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"Warning: grid comparisons failed: {e}")
 
-    print("\n===== PROCESS COMPLETE =====")
+    # ----- Transformer matching + update + map -----
+    transformer_results = None
+    if INCLUDE_TRANSFORMER_MATCHING:
+        print("\n===== RUNNING TRANSFORMER MATCHING =====")
+        JAO_TRANSFORMERS_PATH   = DATA_DIR / "jao_transformers.csv"
+        PYPSA_TRANSFORMERS_PATH = DATA_DIR / "pypsa_transformers.csv"
+
+        if JAO_TRANSFORMERS_PATH.exists() and PYPSA_TRANSFORMERS_PATH.exists():
+            try:
+                transformer_results = run_transformer_matching_pipeline(
+                    JAO_TRANSFORMERS_PATH, PYPSA_TRANSFORMERS_PATH, OUTPUT_DIR, args.transformers_distance
+                )
+                print("Transformer matching completed.")
+                print(f"Matched {transformer_results['statistics']['matched_count']} "
+                      f"out of {transformer_results['statistics']['total_jao']} transformers.")
+            except Exception as e:
+                print(f"Warning: transformer matching failed: {e}")
+
+            # Prefer cleaned transformer CSVs emitted by the pipeline (fallback to originals)
+            cleaned_jao_tx   = OUTPUT_DIR / "jao_transformers_clean.csv"
+            cleaned_pypsa_tx = OUTPUT_DIR / "pypsa_transformers_clean.csv"
+            jao_tx_path_for_update   = cleaned_jao_tx   if cleaned_jao_tx.exists()   else JAO_TRANSFORMERS_PATH
+            pypsa_tx_path_for_update = cleaned_pypsa_tx if cleaned_pypsa_tx.exists() else PYPSA_TRANSFORMERS_PATH
+
+            # Update PyPSA transformer CSV with JAO electrical params
+            try:
+                updated_pypsa_tx = OUTPUT_DIR / "pypsa_transformers_updated.csv"
+                create_updated_pypsa_with_jao_params(
+                    pypsa_csv=str(pypsa_tx_path_for_update),
+                    jao_csv=str(jao_tx_path_for_update),
+                    matches=transformer_results['results_file'] if transformer_results else None,
+                    out_csv=str(updated_pypsa_tx),
+                    overwrite_s_nom=False,
+                    add_eic=True
+                )
+                print(f"Updated PyPSA transformers saved to: {updated_pypsa_tx}")
+            except Exception as e:
+                print(f"Warning: updating PyPSA transformers failed: {e}")
+        else:
+            print("Transformer data files not found. Skipping transformer matching.")
+
+    # Voltage-filtered lines + transformers map (only if we ran transformer matching)
+    pypsa_lines_csv = DATA_DIR / "pypsa_clipped_MVHV_lines.csv"
+    jao_lines_csv   = DATA_DIR / "jao_clipped_lines.csv"
+
+    if transformer_results and pypsa_lines_csv.exists() and jao_lines_csv.exists():
+        try:
+            # Small robust CSV->GDF loader (uses _safe_wkt_load and glues split geometry columns)
+            def _load_tx(path: Path, drop_dummies: bool = False) -> gpd.GeoDataFrame:
+                # Always read as normal comma-separated CSV; cleaned files have quoted WKT
+                df = pd.read_csv(path)  # <- no sep=None, no quotechar override
+
+                if drop_dummies and "name" in df.columns:
+                    s = df["name"].astype(str)
+                    df = df[~s.str.startswith("T_", na=False)]
+                    for c in ("Comment", "comment"):
+                        if c in df.columns:
+                            df = df[~df[c].astype(str).str.contains("Added for coherence", case=False, na=False)]
+
+                # Parse WKT if present
+                if "geometry" in df.columns:
+                    df["geometry"] = df["geometry"].apply(_safe_wkt_load)
+                else:
+                    df["geometry"] = None
+
+                gdf = gpd.GeoDataFrame(df, geometry="geometry", crs="EPSG:4326")
+                mask = gdf["geometry"].notna() & ~gdf["geometry"].apply(lambda g: getattr(g, "is_empty", True))
+                dropped = int((~mask).sum())
+                if dropped:
+                    print(f"{path.name}: dropped {dropped} rows with invalid/missing geometry")
+                return gdf.loc[mask].copy()
+
+            # Prefer cleaned CSVs for mapping
+            jao_tx_csv_for_map = OUTPUT_DIR / "jao_transformers_clean.csv"
+            pypsa_tx_csv_for_map = OUTPUT_DIR / "pypsa_transformers_clean.csv"
+            if not jao_tx_csv_for_map.exists():   jao_tx_csv_for_map = DATA_DIR / "jao_transformers.csv"
+            if not pypsa_tx_csv_for_map.exists(): pypsa_tx_csv_for_map = DATA_DIR / "pypsa_transformers.csv"
+
+            jao_tx_gdf = _load_tx(jao_tx_csv_for_map, drop_dummies=True)
+            pypsa_tx_gdf = _load_tx(pypsa_tx_csv_for_map)
+
+            lv_lines_csv = DATA_DIR / "pypsa_clipped_LV_lines.csv"
+
+            lines_tx_map_out = OUTPUT_DIR / "lines_plus_transformers_matched.html"
+            create_lines_transformers_matched_map(
+                pypsa_lines_csv=pypsa_lines_csv,
+                jao_lines_csv=jao_lines_csv,
+                jao_transformers_gdf=jao_tx_gdf,
+                pypsa_transformers_gdf=pypsa_tx_gdf,
+                matches=transformer_results['results_file'],
+                out_html=lines_tx_map_out,
+                allowed_kv=(220, 225, 380, 400),
+                germany_boundary=None,
+                simplify_tolerance=0.0,
+                lv_lines_csv = lv_lines_csv,
+            )
+            print(f"Voltage-filtered lines + transformers (matched/unmatched) map saved to: {lines_tx_map_out}")
+        except Exception as e:
+            print(f"Warning: creating lines+transformers map failed: {e}")
+    elif transformer_results is None:
+        print("Skipping lines+transformers map: transformer matching did not run.")
+    else:
+        missing = []
+        if not pypsa_lines_csv.exists(): missing.append("pypsa_clipped_MVHV_lines.csv")
+        if not jao_lines_csv.exists():   missing.append("jao_clipped_lines.csv")
+        print("Skipping lines+transformers map: missing", ", ".join(missing) if missing else "(unknown)")
+
 
 
 if __name__ == "__main__":

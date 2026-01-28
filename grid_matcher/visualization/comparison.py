@@ -198,984 +198,747 @@ def prepare_visualization_data(matching_results, pypsa_gdf, jao_gdf=None, use_de
 
     return enhanced_results
 
-
 def visualize_parameter_comparison(matching_results, pypsa_gdf, output_dir="output"):
     """
-    Create HTML visualization comparing original and allocated electrical parameters
-    with divergence-based coloring and column filtering.
-    Includes both total and per-km comparisons with circuit adjustments.
+    Build a self-contained HTML report comparing original (PyPSA) and allocated (JAO) electrical
+    parameters for matched transmission-line segments. The report includes:
+      • Scatter charts with titles (Chart.js) and y=x reference,
+      • Per-km circuit-adjusted charts,
+      • Download PNG buttons for each chart,
+      • Filterable data tables,
+      • Correlation (Pearson r) shown in titles.
+
+    Returns: str path to the generated HTML file.
     """
-    import os
     import json
-    import numpy as np
-    import pandas as pd
     from pathlib import Path
+    import pandas as pd
     from scipy.stats import pearsonr
 
     print("Creating parameter comparison visualizations...")
 
-    # Define calculation function at the beginning
-    def calc_diff_pct(a, b):
-        """
-        Calculate the percentage difference between a (allocated) and b (original).
-        """
+    # ---------- helpers ----------
+    def pct_diff(a, b):
+        """Percentage change from original b to allocated a. Returns None if b ~ 0."""
+        try:
+            b = float(b)
+            a = float(a)
+        except Exception:
+            return None
         if abs(b) < 1e-9:
             return None
-
-        # Calculate as percentage change from original to allocated
         return ((a - b) / abs(b)) * 100.0
 
-    # Create output directory if it doesn't exist
-    output_path = Path(output_dir)
-    output_path.mkdir(exist_ok=True)
+    # ensure output dir
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Create a lookup for PyPSA lines
+    # ---------- fast lookup from PyPSA gdf ----------
+    # Accept 'line_id' (preferred) or fallback to 'id'
     pypsa_lookup = {}
     for _, row in pypsa_gdf.iterrows():
-        key = str(row.get('line_id', row.get('id', '')))
-        pypsa_lookup[key] = row
+        key = str(row.get("line_id", row.get("id", "")))
+        if key:
+            pypsa_lookup[key] = row
 
-    # Prepare data for analysis
-    all_data = []
-
-    for result in matching_results:
-        if not result.get('matched', False):
+    # ---------- build comparison rows ----------
+    rows = []
+    for res in matching_results:
+        if not res.get("matched"):
+            continue
+        segs = res.get("matched_lines_data") or []
+        if not segs:
             continue
 
-        segments = result.get('matched_lines_data', [])
-        if not segments:
-            continue
+        jao_id = res.get("jao_id", "unknown")
+        jao_len_km = float(res.get("jao_length_km") or 0.0)
+        jao_r_tot = float(res.get("jao_r") or 0.0)
+        jao_x_tot = float(res.get("jao_x") or 0.0)
+        jao_b_tot = float(res.get("jao_b") or 0.0)
 
-        jao_id = result.get('jao_id', 'unknown')
-        jao_length_km = float(result.get('jao_length_km', 0) or 0)
-        jao_r_total = float(result.get('jao_r', 0) or 0)
-        jao_x_total = float(result.get('jao_x', 0) or 0)
-        jao_b_total = float(result.get('jao_b', 0) or 0)
+        # per-km (guard divide-by-zero)
+        jao_r_km = jao_r_tot / jao_len_km if jao_len_km > 0 else 0.0
+        jao_x_km = jao_x_tot / jao_len_km if jao_len_km > 0 else 0.0
+        jao_b_km = jao_b_tot / jao_len_km if jao_len_km > 0 else 0.0
 
-        # Calculate per-km values
-        jao_r_km = jao_r_total / jao_length_km if jao_length_km > 0 else 0
-        jao_x_km = jao_x_total / jao_length_km if jao_length_km > 0 else 0
-        jao_b_km = jao_b_total / jao_length_km if jao_length_km > 0 else 0
-
-        for segment in segments:
-            pid = segment.get('network_id', '')
-            pypsa_row = pypsa_lookup.get(pid)
-
-            if pypsa_row is None or segment.get('allocation_status') not in ['Applied', 'Parallel Circuit']:
+        for seg in segs:
+            if seg.get("allocation_status") not in ("Applied", "Parallel Circuit"):
                 continue
 
-            # Get segment data
-            length_km = float(segment.get('length_km', 0) or 0)
-            circuits = int(segment.get('num_parallel', 1) or 1)
+            pid = str(seg.get("network_id", ""))
+            p_row = pypsa_lookup.get(pid)
+            if p_row is None:
+                continue
 
-            # Get allocated parameters from segment
-            allocated_r = float(segment.get('allocated_r', 0) or 0)
-            allocated_x = float(segment.get('allocated_x', 0) or 0)
-            allocated_b = float(segment.get('allocated_b', 0) or 0)
+            length_km = float(seg.get("length_km") or 0.0)
+            # if lengths were in meters sometimes, keep the original logic
+            length_km_conv = (length_km / 1000.0) if length_km > 1000 else length_km
+            circuits = int(seg.get("num_parallel") or 1)
 
-            # Get original parameters directly from PyPSA dataframe
-            original_r = float(pypsa_row.get('r', 0) or 0)
-            original_x = float(pypsa_row.get('x', 0) or 0)
-            original_b = float(pypsa_row.get('b', 0) or 0)
+            # allocated (JAO mapped to this segment)
+            a_r = float(seg.get("allocated_r") or 0.0)
+            a_x = float(seg.get("allocated_x") or 0.0)
+            a_b = float(seg.get("allocated_b") or 0.0)
 
-            # Convert PyPSA length from meters to kilometers if needed
-            # Assuming PyPSA lengths might be in meters (adjust if they're already in km)
-            length_km_converted = length_km / 1000 if length_km > 1000 else length_km  # Only convert if value seems to be in meters
+            # original from PyPSA
+            o_r = float(p_row.get("r") or 0.0)
+            o_x = float(p_row.get("x") or 0.0)
+            o_b = float(p_row.get("b") or 0.0)
 
-            # Calculate PyPSA per-km values
-            # Original per-km values without the 1000 division
-            pypsa_r_per_km = original_r / length_km_converted if length_km_converted > 0 else 0
-            pypsa_x_per_km = original_x / length_km_converted if length_km_converted > 0 else 0
-            pypsa_b_per_km = original_b / length_km_converted if length_km_converted > 0 else 0
+            # per-km for PyPSA (no extra unit conversion beyond length_km_conv)
+            o_r_km = (o_r / length_km_conv) if length_km_conv > 0 else 0.0
+            o_x_km = (o_x / length_km_conv) if length_km_conv > 0 else 0.0
+            o_b_km = (o_b / length_km_conv) if length_km_conv > 0 else 0.0
 
-            # Convert to same units as JAO values (divide by 1000 to match units)
-            pypsa_r_per_km_adjusted = pypsa_r_per_km
-            pypsa_x_per_km_adjusted = pypsa_x_per_km
-            pypsa_b_per_km_adjusted = pypsa_b_per_km
+            # circuit adjustments for JAO per-km values
+            j_r_km_adj = jao_r_km / circuits if circuits > 0 else 0.0   # series ÷ circuits
+            j_x_km_adj = jao_x_km / circuits if circuits > 0 else 0.0   # series ÷ circuits
+            j_b_km_adj = jao_b_km * circuits                             # shunt × circuits
 
-            # Debug logging to verify conversions
-            print(
-                f"PyPSA ID: {pid}, Original R: {original_r}, Length: {length_km_converted}, PyPSA R/km: {pypsa_r_per_km}, Adjusted R/km: {pypsa_r_per_km_adjusted}, JAO R/km: {jao_r_km}")
-
-            # Apply circuit adjustment for per-km values
-            jao_r_km_adjusted = jao_r_km / circuits
-            jao_x_km_adjusted = jao_x_km / circuits
-            jao_b_km_adjusted = jao_b_km * circuits
-
-            # Calculate percentage differences for TOTAL values (original vs. allocated)
-            diff_r_pct = calc_diff_pct(allocated_r, original_r)
-            diff_x_pct = calc_diff_pct(allocated_x, original_x)
-            diff_b_pct = calc_diff_pct(allocated_b, original_b)
-
-            # Calculate percentage differences for PER-KM values (circuit-adjusted)
-            diff_r_pct_km = calc_diff_pct(jao_r_km_adjusted, pypsa_r_per_km_adjusted)
-            diff_x_pct_km = calc_diff_pct(jao_x_km_adjusted, pypsa_x_per_km_adjusted)
-            diff_b_pct_km = calc_diff_pct(jao_b_km_adjusted, pypsa_b_per_km_adjusted)
-
-            # Add to data (only once per segment)
-            all_data.append({
-                'jao_id': jao_id,
-                'pypsa_id': pid,
-                'length_km': length_km,
-                'circuits': circuits,
-                # Total values
-                'original_r': original_r,
-                'allocated_r': allocated_r,
-                'diff_r_pct': diff_r_pct,
-                'original_x': original_x,
-                'allocated_x': allocated_x,
-                'diff_x_pct': diff_x_pct,
-                'original_b': original_b,
-                'allocated_b': allocated_b,
-                'diff_b_pct': diff_b_pct,
-                # Per-km values - with proper conversion
-                'original_r_per_km': pypsa_r_per_km_adjusted,  # Using the adjusted value
-                'original_x_per_km': pypsa_x_per_km_adjusted,  # Using the adjusted value
-                'original_b_per_km': pypsa_b_per_km_adjusted,  # Using the adjusted value
-                'jao_r_km_adjusted': jao_r_km_adjusted,
-                'jao_x_km_adjusted': jao_x_km_adjusted,
-                'jao_b_km_adjusted': jao_b_km_adjusted,
-                'diff_r_pct_km': diff_r_pct_km,
-                'diff_x_pct_km': diff_x_pct_km,
-                'diff_b_pct_km': diff_b_pct_km
+            rows.append({
+                "jao_id": jao_id,
+                "pypsa_id": pid,
+                "length_km": float(length_km),
+                "circuits": circuits,
+                # totals
+                "original_r": o_r, "allocated_r": a_r, "diff_r_pct": pct_diff(a_r, o_r),
+                "original_x": o_x, "allocated_x": a_x, "diff_x_pct": pct_diff(a_x, o_x),
+                "original_b": o_b, "allocated_b": a_b, "diff_b_pct": pct_diff(a_b, o_b),
+                # per-km
+                "original_r_per_km": o_r_km, "original_x_per_km": o_x_km, "original_b_per_km": o_b_km,
+                "jao_r_km_adjusted": j_r_km_adj, "jao_x_km_adjusted": j_x_km_adj, "jao_b_km_adjusted": j_b_km_adj,
+                "diff_r_pct_km": pct_diff(j_r_km_adj, o_r_km),
+                "diff_x_pct_km": pct_diff(j_x_km_adj, o_x_km),
+                "diff_b_pct_km": pct_diff(j_b_km_adj, o_b_km),
             })
 
-    # Calculate correlation coefficients
-    df = pd.DataFrame(all_data)
-    r_values = {}
-    for param in ['r', 'x', 'b']:
-        if len(df) > 1:
-            original_col = f'original_{param}'
-            allocated_col = f'allocated_{param}'
-            mask = (df[original_col] > 0) & (df[allocated_col] > 0)
-            if mask.sum() > 1:
-                r_val, p_val = pearsonr(df.loc[mask, original_col], df.loc[mask, allocated_col])
-                r_values[param] = {'r': r_val, 'p': p_val}
-            else:
-                r_values[param] = {'r': None, 'p': None}
-        else:
-            r_values[param] = {'r': None, 'p': None}
+    df = pd.DataFrame(rows)
 
-    # Generate HTML with per-km comparison charts added
-    html = """<!DOCTYPE html>
-<html>
+    # ---------- correlations for titles ----------
+    r_vals = {}
+    for p in ("r", "x", "b"):
+        if len(df) >= 2:
+            oc, ac = f"original_{p}", f"allocated_{p}"
+            mask = df[oc].astype(float) > 0
+            mask &= df[ac].astype(float) > 0
+            if mask.sum() >= 2:
+                r, _ = pearsonr(df.loc[mask, oc], df.loc[mask, ac])
+                r_vals[p] = round(float(r), 4)
+                continue
+        r_vals[p] = None
+
+    # ---------- HTML (Chart.js + titles + download buttons) ----------
+    html = r"""<!DOCTYPE html>
+<html lang="en">
 <head>
-    <title>Electrical Parameter Comparison</title>
-    <meta charset="utf-8">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-colorschemes"></script>
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            margin: 20px;
-            background-color: #f5f5f5;
-        }
-        h1, h2, h3 {
-            color: #333;
-        }
-        .container {
-            background-color: white;
-            padding: 20px;
-            border-radius: 5px;
-            box-shadow: 0 0 10px rgba(0,0,0,0.1);
-            margin-bottom: 20px;
-        }
-        .chart-container {
-            width: 100%;
-            height: 400px;
-            margin-bottom: 30px;
-        }
-        table {
-            border-collapse: collapse;
-            width: 100%;
-            margin-top: 20px;
-        }
-        th, td {
-            border: 1px solid #ddd;
-            padding: 8px;
-            text-align: left;
-        }
-        th {
-            background-color: #4CAF50;
-            color: white;
-            position: sticky;
-            top: 0;
-        }
-        .filters input {
-            width: 90%;
-            padding: 5px;
-            margin: 2px 0;
-            border: 1px solid #ddd;
-        }
-        .good-match {
-            background-color: #c8e6c9;
-        }
-        .moderate-match {
-            background-color: #fff9c4;
-        }
-        .poor-match {
-            background-color: #ffccbc;
-        }
-        .data-table-container {
-            max-height: 600px;
-            overflow-y: auto;
-        }
-        .section-divider {
-            border-top: 2px solid #4CAF50;
-            margin: 30px 0;
-            padding-top: 10px;
-        }
-        .color-legend {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            margin: 15px 0;
-            padding: 10px;
-            background-color: #fff;
-            border-radius: 5px;
-            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
-        }
-        .color-gradient {
-            width: 300px;
-            height: 20px;
-            background: linear-gradient(to right, #0047ab, #6495ED, #4CAF50, #FF6B6B, #dc143c);
-            margin: 0 15px;
-            border-radius: 3px;
-        }
-        .color-label {
-            font-size: 12px;
-            color: #555;
-        }
-        .tabs {
-            display: flex;
-            margin-bottom: 20px;
-        }
-        .tab {
-            padding: 10px 20px;
-            cursor: pointer;
-            background: #ddd;
-            margin-right: 5px;
-            border-radius: 5px 5px 0 0;
-        }
-        .tab.active {
-            background: #4CAF50;
-            color: white;
-        }
-        .note {
-            font-style: italic;
-            color: #666;
-            margin: 10px 0;
-            padding: 10px;
-            background-color: #f9f9f9;
-            border-left: 4px solid #4CAF50;
-        }
-    </style>
+<meta charset="utf-8">
+<title>Electrical Parameter Comparison</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+  body{font-family:Arial,Helvetica,sans-serif;background:#f5f5f5;margin:20px;}
+  h1,h2{color:#333}
+  .container{background:#fff;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,.08);padding:18px;margin:18px 0;}
+  .chart-container{position:relative;width:100%;height:420px;}
+  .download-bar{margin-top:8px;text-align:right}
+  .download-btn{border:0;border-radius:6px;padding:8px 12px;cursor:pointer;background:#4CAF50;color:#fff}
+  .section-divider{border-top:2px solid #4CAF50;margin:30px 0 10px;padding-top:6px}
+  table{border-collapse:collapse;width:100%;margin-top:12px}
+  th,td{border:1px solid #ddd;padding:6px 8px;text-align:left}
+  th{background:#4CAF50;color:#fff;position:sticky;top:0}
+  .filters input{width:90%;padding:5px;border:1px solid #ddd}
+  .good-match{background:#c8e6c9}
+  .moderate-match{background:#fff9c4}
+  .poor-match{background:#ffccbc}
+  .data-table-container{max-height:600px;overflow:auto}
+  .tabs{display:flex;margin-bottom:10px}
+  .tab{padding:8px 14px;background:#ddd;margin-right:6px;border-radius:6px 6px 0 0;cursor:pointer}
+  .tab.active{background:#4CAF50;color:#fff}
+  .note{font-style:italic;color:#555;background:#f9f9f9;border-left:4px solid #4CAF50;padding:10px;margin:10px 0}
+</style>
 </head>
 <body>
-    <h1>Electrical Parameter Comparison</h1>
+  <h1>Electrical Parameter Comparison</h1>
 
-    <div class="note">
-        <strong>Note:</strong> This visualization shows both total and per-km values. The per-km comparisons use circuit-adjusted values:
-        <ul>
-            <li>For series elements (R, X): JAO value is divided by the number of circuits</li>
-            <li>For parallel elements (B): JAO value is multiplied by the number of circuits</li>
-        </ul>
-        This adjustment matches the parameter allocation table's approach.
+  <div class="note">
+    <strong>Note:</strong> Per-km charts use circuit-adjusted values:
+    <ul>
+      <li>Series terms (R, X): JAO per-km ÷ number of circuits</li>
+      <li>Shunt term (B): JAO per-km × number of circuits</li>
+    </ul>
+  </div>
+
+  <h2 class="section-divider">Total Parameter Comparison</h2>
+
+  <div class="container">
+    <h2>Resistance (R) — Totals</h2>
+    <div class="chart-container"><canvas id="r_tot"></canvas></div>
+    <div class="download-bar"><button class="download-btn" data-target="r_tot">Download PNG</button></div>
+  </div>
+
+  <div class="container">
+    <h2>Reactance (X) — Totals</h2>
+    <div class="chart-container"><canvas id="x_tot"></canvas></div>
+    <div class="download-bar"><button class="download-btn" data-target="x_tot">Download PNG</button></div>
+  </div>
+
+  <div class="container">
+    <h2>Susceptance (B) — Totals</h2>
+    <div class="chart-container"><canvas id="b_tot"></canvas></div>
+    <div class="download-bar"><button class="download-btn" data-target="b_tot">Download PNG</button></div>
+  </div>
+
+  <h2 class="section-divider">Per-km Parameter Comparison (Circuit-adjusted)</h2>
+
+  <div class="container">
+    <h2>R (Ω/km) — Per-km</h2>
+    <div class="chart-container"><canvas id="r_km"></canvas></div>
+    <div class="download-bar"><button class="download-btn" data-target="r_km">Download PNG</button></div>
+  </div>
+
+  <div class="container">
+    <h2>X (Ω/km) — Per-km</h2>
+    <div class="chart-container"><canvas id="x_km"></canvas></div>
+    <div class="download-bar"><button class="download-btn" data-target="x_km">Download PNG</button></div>
+  </div>
+
+  <div class="container">
+    <h2>B (S/km) — Per-km</h2>
+    <div class="chart-container"><canvas id="b_km"></canvas></div>
+    <div class="download-bar"><button class="download-btn" data-target="b_km">Download PNG</button></div>
+  </div>
+
+  <h2 class="section-divider">Data Tables</h2>
+  <div class="container">
+    <div class="tabs">
+      <div class="tab active" onclick="showTable('tbl_tot')">Total Values</div>
+      <div class="tab" onclick="showTable('tbl_km')">Per-km Values</div>
     </div>
 
-    <div class="color-legend">
-        <span class="color-label">-100%</span>
-        <div class="color-gradient"></div>
-        <span class="color-label">+100%</span>
-        <span style="margin-left: 20px; font-style: italic; color: #666;">Color represents difference percentage</span>
+    <div id="tbl_tot" class="data-table-container">
+      <table id="tot_table">
+        <thead>
+          <tr>
+            <th>JAO ID</th><th>PyPSA ID</th><th>Length (km)</th><th>Circuits</th>
+            <th>Original R (Ω)</th><th>Allocated R (Ω)</th><th>R Diff (%)</th>
+            <th>Original X (Ω)</th><th>Allocated X (Ω)</th><th>X Diff (%)</th>
+            <th>Original B (S)</th><th>Allocated B (S)</th><th>B Diff (%)</th>
+          </tr>
+          <tr class="filters">
+            <td><input data-col="0" placeholder="Filter JAO"></td>
+            <td><input data-col="1" placeholder="Filter PyPSA"></td>
+            <td><input data-col="2" placeholder="Length"></td>
+            <td><input data-col="3" placeholder="Circuits"></td>
+            <td><input data-col="4" placeholder="Orig R"></td>
+            <td><input data-col="5" placeholder="Alloc R"></td>
+            <td><input data-col="6" placeholder="R %"></td>
+            <td><input data-col="7" placeholder="Orig X"></td>
+            <td><input data-col="8" placeholder="Alloc X"></td>
+            <td><input data-col="9" placeholder="X %"></td>
+            <td><input data-col="10" placeholder="Orig B"></td>
+            <td><input data-col="11" placeholder="Alloc B"></td>
+            <td><input data-col="12" placeholder="B %"></td>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
     </div>
 
-    <h2 class="section-divider">Total Parameter Comparison</h2>
-
-    <div class="container">
-        <h2>Resistance (R) Comparison - Total Values</h2>
-        <div class="chart-container">
-            <canvas id="r-scatter"></canvas>
-        </div>
+    <div id="tbl_km" class="data-table-container" style="display:none">
+      <table id="km_table">
+        <thead>
+          <tr>
+            <th>JAO ID</th><th>PyPSA ID</th><th>Length (km)</th><th>Circuits</th>
+            <th>PyPSA R (Ω/km)</th><th>JAO R (Ω/km)</th><th>R Diff (%)</th>
+            <th>PyPSA X (Ω/km)</th><th>JAO X (Ω/km)</th><th>X Diff (%)</th>
+            <th>PyPSA B (S/km)</th><th>JAO B (S/km)</th><th>B Diff (%)</th>
+          </tr>
+          <tr class="filters">
+            <td><input data-col="0" placeholder="Filter JAO"></td>
+            <td><input data-col="1" placeholder="Filter PyPSA"></td>
+            <td><input data-col="2" placeholder="Length"></td>
+            <td><input data-col="3" placeholder="Circuits"></td>
+            <td><input data-col="4" placeholder="PyPSA R"></td>
+            <td><input data-col="5" placeholder="JAO R"></td>
+            <td><input data-col="6" placeholder="R %"></td>
+            <td><input data-col="7" placeholder="PyPSA X"></td>
+            <td><input data-col="8" placeholder="JAO X"></td>
+            <td><input data-col="9" placeholder="X %"></td>
+            <td><input data-col="10" placeholder="PyPSA B"></td>
+            <td><input data-col="11" placeholder="JAO B"></td>
+            <td><input data-col="12" placeholder="B %"></td>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
     </div>
+  </div>
 
-    <div class="container">
-        <h2>Reactance (X) Comparison - Total Values</h2>
-        <div class="chart-container">
-            <canvas id="x-scatter"></canvas>
-        </div>
-    </div>
+<script>
+  // -------- data from Python --------
+  const DATA = __DATA_JSON__;
+  const RVALUES = __R_VALUES__;
 
-    <div class="container">
-        <h2>Susceptance (B) Comparison - Total Values</h2>
-        <div class="chart-container">
-            <canvas id="b-scatter"></canvas>
-        </div>
-    </div>
+  // -------- utilities --------
+  function colorByDiff(p){
+    if (p === null || isNaN(p)) return 'rgba(100,100,100,0.8)';
+    const clamped = Math.max(-100, Math.min(100, p));
+    if (clamped < 0){
+      const t = Math.min(1, Math.abs(clamped)/50);
+      const r = Math.round(76 + (0 - 76)*t);
+      const g = Math.round(175 + (71 - 175)*t);
+      const b = Math.round(80 + (171 - 80)*t);
+      return `rgba(${r},${g},${b},0.8)`; // blue-ish to green
+    }else{
+      const t = Math.min(1, clamped/50);
+      const r = Math.round(76 + (220 - 76)*t);
+      const g = Math.round(175 + (20 - 175)*t);
+      const b = Math.round(80 + (60 - 80)*t);
+      return `rgba(${r},${g},${b},0.8)`; // green to red
+    }
+  }
 
-    <h2 class="section-divider">Per-km Parameter Comparison (Circuit-adjusted)</h2>
+  function axisLabel(param, perKm){
+    if (param==='r') return perKm ? 'R (Ω/km)' : 'R (Ω)';
+    if (param==='x') return perKm ? 'X (Ω/km)' : 'X (Ω)';
+    return perKm ? 'B (S/km)' : 'B (S)';
+  }
 
-    <div class="container">
-        <h2>PyPSA vs JAO Resistance (R) Per-km Comparison</h2>
-        <div class="chart-container">
-            <canvas id="r-per-km"></canvas>
-        </div>
-    </div>
+  // Ensure square-ish domain around y=x
+  function domainFor(items){
+    const xs = items.map(d=>d.x), ys = items.map(d=>d.y);
+    const lo = Math.min(Math.min(...xs), Math.min(...ys));
+    const hi = Math.max(Math.max(...xs), Math.max(...ys));
+    const pad = 0.1*(hi - lo || 1);
+    return {min: lo - pad, max: hi + pad};
+  }
 
-    <div class="container">
-        <h2>PyPSA vs JAO Reactance (X) Per-km Comparison</h2>
-        <div class="chart-container">
-            <canvas id="x-per-km"></canvas>
-        </div>
-    </div>
+  function titleText(prefix, param){
+    const lab = axisLabel(param,false);
+    const r = (RVALUES && RVALUES[param]!=null) ? RVALUES[param] : 'N/A';
+    return `${prefix} ${lab} (r=${r})`;
+  }
 
-    <div class="container">
-        <h2>PyPSA vs JAO Susceptance (B) Per-km Comparison</h2>
-        <div class="chart-container">
-            <canvas id="b-per-km"></canvas>
-        </div>
-    </div>
+  // -------- chart builders --------
+  function buildTotals(param, canvasId){
+    const items = DATA
+      .map(it => ({
+        x: +it['original_'+param], y: +it['allocated_'+param],
+        diff: it['diff_'+param+'_pct']
+      }))
+      .filter(d => isFinite(d.x) && isFinite(d.y) && d.x>0 && d.y>0);
 
-    <h2 class="section-divider">PyPSA vs JAO Parameter Comparison</h2>
+    const dom = domainFor(items);
+    const ctx = document.getElementById(canvasId).getContext('2d');
 
-    <div class="container">
-        <h2>PyPSA vs JAO Resistance (R) Comparison</h2>
-        <div class="chart-container">
-            <canvas id="r-comparison"></canvas>
-        </div>
-    </div>
-
-    <div class="container">
-        <h2>PyPSA vs JAO Reactance (X) Comparison</h2>
-        <div class="chart-container">
-            <canvas id="x-comparison"></canvas>
-        </div>
-    </div>
-
-    <div class="container">
-        <h2>PyPSA vs JAO Susceptance (B) Comparison</h2>
-        <div class="chart-container">
-            <canvas id="b-comparison"></canvas>
-        </div>
-    </div>
-
-    <div class="container">
-        <h2>Data Table</h2>
-        <div class="tabs">
-            <div class="tab active" onclick="showTable('total-table')">Total Values</div>
-            <div class="tab" onclick="showTable('per-km-table')">Per-km Values</div>
-        </div>
-
-        <div id="total-table" class="data-table-container">
-            <table id="data-table">
-                <thead>
-                    <tr>
-                        <th>JAO ID</th>
-                        <th>PyPSA ID</th>
-                        <th>Length (km)</th>
-                        <th>Circuits</th>
-                        <th>Original R (Ω)</th>
-                        <th>Allocated R (Ω)</th>
-                        <th>R Diff (%)</th>
-                        <th>Original X (Ω)</th>
-                        <th>Allocated X (Ω)</th>
-                        <th>X Diff (%)</th>
-                        <th>Original B (S)</th>
-                        <th>Allocated B (S)</th>
-                        <th>B Diff (%)</th>
-                    </tr>
-                    <tr class="filters">
-                        <td><input type="text" data-col="0" placeholder="Filter JAO ID"></td>
-                        <td><input type="text" data-col="1" placeholder="Filter PyPSA ID"></td>
-                        <td><input type="text" data-col="2" placeholder="Filter Length"></td>
-                        <td><input type="text" data-col="3" placeholder="Filter Circuits"></td>
-                        <td><input type="text" data-col="4" placeholder="Filter Original R"></td>
-                        <td><input type="text" data-col="5" placeholder="Filter Allocated R"></td>
-                        <td><input type="text" data-col="6" placeholder="Filter R Diff"></td>
-                        <td><input type="text" data-col="7" placeholder="Filter Original X"></td>
-                        <td><input type="text" data-col="8" placeholder="Filter Allocated X"></td>
-                        <td><input type="text" data-col="9" placeholder="Filter X Diff"></td>
-                        <td><input type="text" data-col="10" placeholder="Filter Original B"></td>
-                        <td><input type="text" data-col="11" placeholder="Filter Allocated B"></td>
-                        <td><input type="text" data-col="12" placeholder="Filter B Diff"></td>
-                    </tr>
-                </thead>
-                <tbody>
-                    <!-- Data rows will be inserted here -->
-                </tbody>
-            </table>
-        </div>
-
-        <div id="per-km-table" class="data-table-container" style="display: none;">
-            <table id="per-km-data-table">
-                <thead>
-                    <tr>
-                        <th>JAO ID</th>
-                        <th>PyPSA ID</th>
-                        <th>Length (km)</th>
-                        <th>Circuits</th>
-                        <th>PyPSA R (Ω/km)</th>
-                        <th>JAO R (Ω/km)</th>
-                        <th>R Diff (%)</th>
-                        <th>PyPSA X (Ω/km)</th>
-                        <th>JAO X (Ω/km)</th>
-                        <th>X Diff (%)</th>
-                        <th>PyPSA B (S/km)</th>
-                        <th>JAO B (S/km)</th>
-                        <th>B Diff (%)</th>
-                    </tr>
-                    <tr class="filters">
-                        <td><input type="text" data-col="0" placeholder="Filter JAO ID"></td>
-                        <td><input type="text" data-col="1" placeholder="Filter PyPSA ID"></td>
-                        <td><input type="text" data-col="2" placeholder="Filter Length"></td>
-                        <td><input type="text" data-col="3" placeholder="Filter Circuits"></td>
-                        <td><input type="text" data-col="4" placeholder="Filter PyPSA R"></td>
-                        <td><input type="text" data-col="5" placeholder="Filter JAO R"></td>
-                        <td><input type="text" data-col="6" placeholder="Filter R Diff"></td>
-                        <td><input type="text" data-col="7" placeholder="Filter PyPSA X"></td>
-                        <td><input type="text" data-col="8" placeholder="Filter JAO X"></td>
-                        <td><input type="text" data-col="9" placeholder="Filter X Diff"></td>
-                        <td><input type="text" data-col="10" placeholder="Filter PyPSA B"></td>
-                        <td><input type="text" data-col="11" placeholder="Filter JAO B"></td>
-                        <td><input type="text" data-col="12" placeholder="Filter B Diff"></td>
-                    </tr>
-                </thead>
-                <tbody>
-                    <!-- Per-km data rows will be inserted here -->
-                </tbody>
-            </table>
-        </div>
-    </div>
-
-    <script>
-        // Data from Python
-        const data = DATA_PLACEHOLDER;
-
-        // Function to get color based on actual difference percentage - MORE DISTINCT COLORS
-        function getDifferenceColor(diffPct) {
-            if (diffPct === null || isNaN(diffPct)) {
-                return 'rgba(100, 100, 100, 0.8)';  // Dark gray for N/A
+    new Chart(ctx, {
+      type:'scatter',
+      data:{
+        datasets:[
+          {label:'Values', data:items.map(d=>({x:d.x, y:d.y})),
+           backgroundColor: items.map(d=>colorByDiff(d.diff)), pointRadius:5, pointHoverRadius:7},
+          {label:'y=x', data:[{x:dom.min,y:dom.min},{x:dom.max,y:dom.max}],
+           showLine:true, pointRadius:0, borderColor:'rgba(128,128,128,.6)', borderDash:[5,5], borderWidth:2}
+        ]
+      },
+      options:{
+        responsive:true, maintainAspectRatio:false,
+        plugins:{
+          title:{display:true, text:titleText('Original vs Allocated', param), font:{size:16, weight:'600'}},
+          legend:{display:false},
+          tooltip:{
+            callbacks:{
+              label:(ctx)=>{
+                const p = items[ctx.dataIndex];
+                const diff = (p.diff==null||isNaN(p.diff)) ? 'N/A' : p.diff.toFixed(2)+'%';
+                return [`Original: ${p.x.toFixed(6)}`, `Allocated: ${p.y.toFixed(6)}`, `Difference: ${diff}`];
+              }
             }
+          }
+        },
+        scales:{
+          x:{title:{display:true, text:`Original ${axisLabel(param,false)}`}},
+          y:{title:{display:true, text:`Allocated ${axisLabel(param,false)}`}}
+        }
+      }
+    });
+  }
 
-            // Clamp to a reasonable range
-            const clampedDiff = Math.max(-100, Math.min(100, diffPct));
+  function buildPerKm(param, canvasId){
+    const items = DATA
+      .map(it => ({
+        x: +it['original_'+param+'_per_km'],
+        y: +it['jao_'+param+'_km_adjusted'],
+        diff: it['diff_'+param+'_pct_km']
+      }))
+      .filter(d => isFinite(d.x) && isFinite(d.y) && d.x>0 && d.y>0);
 
-            // Create a continuous color gradient
-            if (clampedDiff < 0) {
-                // Blend from blue to green as we approach zero from negative side
-                const ratio = Math.min(1, Math.abs(clampedDiff) / 50);  // 50% as full intensity point
-                const r = Math.round(76 + (0 - 76) * ratio);  // Blend from green's R to blue's R
-                const g = Math.round(175 + (71 - 175) * ratio);  // Blend from green's G to blue's G
-                const b = Math.round(80 + (171 - 80) * ratio);  // Blend from green's B to blue's B
-                return `rgba(${r}, ${g}, ${b}, 0.8)`;
-            } else {
-                // Blend from green to red as we move positive
-                const ratio = Math.min(1, clampedDiff / 50);  // 50% as full intensity point
-                const r = Math.round(76 + (220 - 76) * ratio);  // Blend from green's R to red's R
-                const g = Math.round(175 + (20 - 175) * ratio);  // Blend from green's G to red's G
-                const b = Math.round(80 + (60 - 80) * ratio);  // Blend from green's B to red's B
-                return `rgba(${r}, ${g}, ${b}, 0.8)`;
+    const ctx = document.getElementById(canvasId).getContext('2d');
+    new Chart(ctx, {
+      type:'scatter',
+      data:{
+        datasets:[
+          {label:'Values per-km', data:items.map(d=>({x:d.x, y:d.y})),
+           backgroundColor: items.map(d=>colorByDiff(d.diff)), pointRadius:5, pointHoverRadius:7}
+        ]
+      },
+      options:{
+        responsive:true, maintainAspectRatio:false,
+        plugins:{
+          title:{display:true, text:titleText('PyPSA vs JAO — Per-km (circuit-adjusted)', param), font:{size:16, weight:'600'}},
+          legend:{display:false},
+          tooltip:{
+            callbacks:{
+              label:(ctx)=>{
+                const p = items[ctx.dataIndex];
+                const diff = (p.diff==null||isNaN(p.diff)) ? 'N/A' : p.diff.toFixed(2)+'%';
+                return [`PyPSA: ${p.x.toExponential(6)}`, `JAO: ${p.y.toExponential(6)}`, `Difference: ${diff}`];
+              }
             }
+          }
+        },
+        scales:{
+          x:{type:'logarithmic', title:{display:true, text:`PyPSA ${axisLabel(param,true)}`}},
+          y:{type:'logarithmic', title:{display:true, text:`JAO ${axisLabel(param,true)} (adjusted)`}}
         }
+      }
+    });
+  }
 
-        // Create scatter plots for total values
-        function createScatterPlot(param, canvasId) {
-            const ctx = document.getElementById(canvasId).getContext('2d');
-
-            // Prepare data - IMPORTANT: Use diff_param_pct (not diff_param_pct_km)
-            const chartData = data.map(item => {
-                const diffPct = item['diff_' + param + '_pct']; // For TOTAL values
-                return {
-                    x: item['original_' + param],
-                    y: item['allocated_' + param],
-                    diffPct: diffPct,
-                    color: getDifferenceColor(diffPct)
-                };
-            }).filter(d => d.x > 1e-10 && d.y > 1e-10 && !isNaN(d.x) && !isNaN(d.y));
-
-            // Calculate min/max for both axes
-            const allX = chartData.map(d => d.x);
-            const allY = chartData.map(d => d.y);
-            const minX = Math.min(...allX) * 0.9;
-            const maxX = Math.max(...allX) * 1.1;
-            const minY = Math.min(...allY) * 0.9;
-            const maxY = Math.max(...allY) * 1.1;
-
-            // Calculate diagonal line points
-            const min = Math.min(minX, minY);
-            const max = Math.max(maxX, maxY);
-            const diagonalLine = [{ x: min, y: min }, { x: max, y: max }];
-
-            // Create chart
-            new Chart(ctx, {
-                type: 'scatter',
-                data: {
-                    datasets: [
-                        {
-                            label: 'Parameter Values',
-                            data: chartData,
-                            backgroundColor: chartData.map(d => d.color),
-                            pointRadius: 6,
-                            pointHoverRadius: 8,
-                            pointBorderColor: 'rgba(0,0,0,0.2)'
-                        },
-                        {
-                            label: 'y = x',
-                            data: diagonalLine,
-                            showLine: true,
-                            fill: false,
-                            pointRadius: 0,
-                            borderColor: 'rgba(128, 128, 128, 0.5)',
-                            borderDash: [5, 5],
-                            borderWidth: 2
-                        }
-                    ]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: {
-                        title: {
-                            display: true,
-                            text: 'Original vs Allocated ' + param.toUpperCase() + ' Values (R=' + R_VALUES[param] + ')',
-                            font: { size: 16 }
-                        },
-                        tooltip: {
-                            callbacks: {
-                                label: function(context) {
-                                    const point = chartData[context.dataIndex];
-                                    return [
-                                        'Original: ' + point.x.toFixed(6),
-                                        'Allocated: ' + point.y.toFixed(6),
-                                        'Difference: ' + (point.diffPct ? point.diffPct.toFixed(2) + '%' : 'N/A')
-                                    ];
-                                }
-                            }
-                        },
-                        legend: {
-                            display: false // Hide the default legend as we have custom gradient legend
-                        }
-                    },
-                    scales: {
-                        x: {
-                            title: {
-                                display: true,
-                                text: 'Original ' + (param === 'r' ? 'Resistance (Ω)' : param === 'x' ? 'Reactance (Ω)' : 'Susceptance (S)')
-                            }
-                        },
-                        y: {
-                            title: {
-                                display: true,
-                                text: 'Allocated ' + (param === 'r' ? 'Resistance (Ω)' : param === 'x' ? 'Reactance (Ω)' : 'Susceptance (S)')
-                            }
-                        }
-                    }
-                }
-            });
+  // -------- tables --------
+  function fillTotalsTable(){
+    const tb = document.querySelector('#tot_table tbody');
+    tb.innerHTML = '';
+    DATA.forEach(it=>{
+      const tr = document.createElement('tr');
+      const cells = [
+        it.jao_id, it.pypsa_id,
+        (isFinite(+it.length_km)? (+it.length_km).toFixed(2):''),
+        it.circuits,
+        (+it.original_r).toFixed(6), (+it.allocated_r).toFixed(6),
+        it.diff_r_pct==null?'N/A':(+it.diff_r_pct).toFixed(2)+'%',
+        (+it.original_x).toFixed(6), (+it.allocated_x).toFixed(6),
+        it.diff_x_pct==null?'N/A':(+it.diff_x_pct).toFixed(2)+'%',
+        (+it.original_b).toExponential(6), (+it.allocated_b).toExponential(6),
+        it.diff_b_pct==null?'N/A':(+it.diff_b_pct).toFixed(2)+'%'
+      ];
+      cells.forEach((txt, idx)=>{
+        const td = document.createElement('td'); td.textContent = txt;
+        if ([6,9,12].includes(idx)){ // diff columns
+          const v = parseFloat(String(txt).replace('%',''));
+          if (!isNaN(v)){
+            td.className = Math.abs(v)<=20 ? 'good-match' : (Math.abs(v)<=50 ? 'moderate-match' : 'poor-match');
+          }
         }
+        tr.appendChild(td);
+      });
+      tb.appendChild(tr);
+    });
+  }
 
-        // Create PyPSA vs JAO comparison charts for total values
-        function createComparisonChart(param, canvasId) {
-            const ctx = document.getElementById(canvasId).getContext('2d');
-
-            // Prepare data - IMPORTANT: Use diff_param_pct (not diff_param_pct_km)
-            const chartData = data.map(item => {
-                const diffPct = item['diff_' + param + '_pct']; // For TOTAL values
-                return {
-                    x: item['original_' + param],
-                    y: item['allocated_' + param],
-                    jao_id: item.jao_id,
-                    pypsa_id: item.pypsa_id,
-                    length_km: item.length_km,
-                    circuits: item.circuits,
-                    diffPct: diffPct,
-                    color: getDifferenceColor(diffPct)
-                };
-            }).filter(d => d.x > 0 && d.y > 0);
-
-            // Calculate min/max for both axes
-            const allX = chartData.map(d => d.x);
-            const allY = chartData.map(d => d.y);
-            const minX = Math.min(...allX) * 0.9;
-            const maxX = Math.max(...allX) * 1.1;
-            const minY = Math.min(...allY) * 0.9;
-            const maxY = Math.max(...allY) * 1.1;
-
-            // Calculate diagonal line points
-            const min = Math.min(minX, minY);
-            const max = Math.max(maxX, maxY);
-            const diagonalLine = [{ x: min, y: min }, { x: max, y: max }];
-
-            // Create chart
-            new Chart(ctx, {
-                type: 'scatter',
-                data: {
-                    datasets: [
-                        {
-                            label: 'Parameter Values',
-                            data: chartData,
-                            backgroundColor: chartData.map(d => d.color),
-                            pointRadius: 6,
-                            pointHoverRadius: 8,
-                            pointBorderColor: 'rgba(0,0,0,0.2)'
-                        },
-                        {
-                            label: 'y = x',
-                            data: diagonalLine,
-                            showLine: true,
-                            fill: false,
-                            pointRadius: 0,
-                            borderColor: 'rgba(128, 128, 128, 0.5)',
-                            borderDash: [5, 5],
-                            borderWidth: 2
-                        }
-                    ]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: {
-                        title: {
-                            display: true,
-                            text: 'PyPSA vs JAO ' + param.toUpperCase() + ' Values (R=' + R_VALUES[param] + ')',
-                            font: { size: 16 }
-                        },
-                        tooltip: {
-                            callbacks: {
-                                label: function(context) {
-                                    const point = chartData[context.dataIndex];
-                                    return [
-                                        'JAO ID: ' + point.jao_id,
-                                        'PyPSA ID: ' + point.pypsa_id,
-                                        'Length: ' + point.length_km.toFixed(2) + ' km',
-                                        'Circuits: ' + point.circuits,
-                                        'PyPSA: ' + point.x.toFixed(6),
-                                        'JAO: ' + point.y.toFixed(6),
-                                        'Difference: ' + (point.diffPct ? point.diffPct.toFixed(2) + '%' : 'N/A')
-                                    ];
-                                }
-                            }
-                        },
-                        legend: {
-                            display: false // Hide the default legend as we have custom gradient legend
-                        }
-                    },
-                    scales: {
-                        x: {
-                            title: {
-                                display: true,
-                                text: 'PyPSA ' + (param === 'r' ? 'Resistance (Ω)' : param === 'x' ? 'Reactance (Ω)' : 'Susceptance (S)')
-                            }
-                        },
-                        y: {
-                            title: {
-                                display: true,
-                                text: 'JAO ' + (param === 'r' ? 'Resistance (Ω)' : param === 'x' ? 'Reactance (Ω)' : 'Susceptance (S)')
-                            }
-                        }
-                    }
-                }
-            });
+  function fillPerKmTable(){
+    const tb = document.querySelector('#km_table tbody');
+    tb.innerHTML = '';
+    DATA.forEach(it=>{
+      const tr = document.createElement('tr');
+      const cells = [
+        it.jao_id, it.pypsa_id,
+        (isFinite(+it.length_km)? (+it.length_km).toFixed(2):''),
+        it.circuits,
+        (+it.original_r_per_km).toFixed(6), (+it.jao_r_km_adjusted).toFixed(6),
+        it.diff_r_pct_km==null?'N/A':(+it.diff_r_pct_km).toFixed(2)+'%',
+        (+it.original_x_per_km).toFixed(6), (+it.jao_x_km_adjusted).toFixed(6),
+        it.diff_x_pct_km==null?'N/A':(+it.diff_x_pct_km).toFixed(2)+'%',
+        (+it.original_b_per_km).toExponential(6), (+it.jao_b_km_adjusted).toExponential(6),
+        it.diff_b_pct_km==null?'N/A':(+it.diff_b_pct_km).toFixed(2)+'%'
+      ];
+      cells.forEach((txt, idx)=>{
+        const td = document.createElement('td'); td.textContent = txt;
+        if ([6,9,12].includes(idx)){
+          const v = parseFloat(String(txt).replace('%',''));
+          if (!isNaN(v)){
+            td.className = Math.abs(v)<=20 ? 'good-match' : (Math.abs(v)<=50 ? 'moderate-match' : 'poor-match');
+          }
         }
+        tr.appendChild(td);
+      });
+      tb.appendChild(tr);
+    });
+  }
 
-        // Create per-km comparison charts
-        function createPerKmChart(param, canvasId) {
-            const ctx = document.getElementById(canvasId).getContext('2d');
-
-            // Prepare per-km data with circuit adjustments - IMPORTANT: Use diff_param_pct_km
-            const chartData = data.map(item => {
-                const diffPct = item['diff_' + param + '_pct_km']; // For PER-KM values
-                return {
-                    x: item['original_' + param + '_per_km'],
-                    y: item['jao_' + param + '_km_adjusted'],
-                    jao_id: item.jao_id,
-                    pypsa_id: item.pypsa_id,
-                    length_km: item.length_km,
-                    circuits: item.circuits,
-                    diffPct: diffPct,
-                    color: getDifferenceColor(diffPct)
-                };
-            }).filter(d => d.x > 0 && d.y > 0);
-
-            // Calculate min/max for both axes
-            const allX = chartData.map(d => d.x);
-            const allY = chartData.map(d => d.y);
-            const minX = Math.min(...allX) * 0.9;
-            const maxX = Math.max(...allX) * 1.1;
-            const minY = Math.min(...allY) * 0.9;
-            const maxY = Math.max(...allY) * 1.1;
-
-            // Calculate diagonal line points
-            const min = Math.min(minX, minY);
-            const max = Math.max(maxX, maxY);
-            const diagonalLine = [{ x: min, y: min }, { x: max, y: max }];
-
-            // Create chart
-            new Chart(ctx, {
-                type: 'scatter',
-                data: {
-                    datasets: [
-                        {
-                            label: 'Parameter Values Per-km',
-                            data: chartData,
-                            backgroundColor: chartData.map(d => d.color),
-                            pointRadius: 6,
-                            pointHoverRadius: 8,
-                            pointBorderColor: 'rgba(0,0,0,0.2)'
-                        },
-                        {
-                            label: 'y = x',
-                            data: diagonalLine,
-                            showLine: true,
-                            fill: false,
-                            pointRadius: 0,
-                            borderColor: 'rgba(128, 128, 128, 0.5)',
-                            borderDash: [5, 5],
-                            borderWidth: 2
-                        }
-                    ]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: {
-                        title: {
-                            display: true,
-                            text: 'PyPSA vs JAO ' + param.toUpperCase() + ' Per-km Values (Circuit-adjusted, R=' + R_VALUES[param] + ')',
-                            font: { size: 16 }
-                        },
-                        tooltip: {
-                            callbacks: {
-                                label: function(context) {
-                                    const point = chartData[context.dataIndex];
-                                    return [
-                                        'JAO ID: ' + point.jao_id,
-                                        'PyPSA ID: ' + point.pypsa_id,
-                                        'Length: ' + point.length_km.toFixed(2) + ' km',
-                                        'Circuits: ' + point.circuits,
-                                        'PyPSA: ' + point.x.toFixed(6) + ' per km',
-                                        'JAO: ' + point.y.toFixed(6) + ' per km (circuit-adjusted)',
-                                        'Difference: ' + (point.diffPct ? point.diffPct.toFixed(2) + '%' : 'N/A')
-                                    ];
-                                }
-                            }
-                        },
-                        legend: {
-                            display: false // Hide the default legend as we have custom gradient legend
-                        }
-                    },
-                    scales: {
-                        x: {
-                            type: 'logarithmic',
-                            title: {
-                                display: true,
-                                text: 'PyPSA ' + (param === 'r' ? 'Resistance (Ω/km)' : param === 'x' ? 'Reactance (Ω/km)' : 'Susceptance (S/km)')
-                            }
-                        },
-                        y: {
-                            type: 'logarithmic',
-                            title: {
-                                display: true,
-                                text: 'JAO ' + (param === 'r' ? 'Resistance (Ω/km)' : param === 'x' ? 'Reactance (Ω/km)' : 'Susceptance (S/km)') + ' (circuit-adjusted)'
-                            }
-                        }
-                    }
-                }
-            });
-        }
-
-        // Populate the data table for total values
-        function populateTable() {
-            const tbody = document.querySelector('#data-table tbody');
-            tbody.innerHTML = '';
-
-            data.forEach(item => {
-                const row = document.createElement('tr');
-
-                // Add cells with TOTAL values and diff_*_pct
-                [
-                    item.jao_id,
-                    item.pypsa_id,
-                    item.length_km.toFixed(2),
-                    item.circuits,
-                    item.original_r.toFixed(6),
-                    item.allocated_r.toFixed(6),
-                    item.diff_r_pct ? (Math.abs(item.diff_r_pct) > 1000 ? (item.diff_r_pct > 0 ? '+' : '-') + '999.99%' : item.diff_r_pct.toFixed(2) + '%') : 'N/A',
-                    item.original_x.toFixed(6),
-                    item.allocated_x.toFixed(6),
-                    item.diff_x_pct ? (Math.abs(item.diff_x_pct) > 1000 ? (item.diff_x_pct > 0 ? '+' : '-') + '999.99%' : item.diff_x_pct.toFixed(2) + '%') : 'N/A',
-                    item.original_b.toExponential(6),
-                    item.allocated_b.toExponential(6),
-                    item.diff_b_pct ? (Math.abs(item.diff_b_pct) > 1000 ? (item.diff_b_pct > 0 ? '+' : '-') + '999.99%' : item.diff_b_pct.toFixed(2) + '%') : 'N/A'
-                ].forEach((text, index) => {
-                    const td = document.createElement('td');
-                    td.textContent = text;
-
-                    // Add color coding for difference percentages
-                    if (index === 6 || index === 9 || index === 12) { // R, X, B diff columns
-                        const pct = parseFloat(text);
-                        if (!isNaN(pct)) {
-                            if (Math.abs(pct) <= 20) {
-                                td.className = 'good-match';
-                            } else if (Math.abs(pct) <= 50) {
-                                td.className = 'moderate-match';
-                            } else {
-                                td.className = 'poor-match';
-                            }
-                        }
-                    }
-
-                    row.appendChild(td);
-                });
-
-                tbody.appendChild(row);
-            });
-        }
-
-        // Populate the per-km data table
-        function populatePerKmTable() {
-            const tbody = document.querySelector('#per-km-data-table tbody');
-            tbody.innerHTML = '';
-
-            data.forEach(item => {
-                const row = document.createElement('tr');
-
-                // Add cells with PER-KM values and diff_*_pct_km
-                [
-                    item.jao_id,
-                    item.pypsa_id,
-                    item.length_km.toFixed(2),
-                    item.circuits,
-                    item.original_r_per_km.toFixed(6),
-                    item.jao_r_km_adjusted.toFixed(6),
-                    item.diff_r_pct_km ? (Math.abs(item.diff_r_pct_km) > 1000 ? (item.diff_r_pct_km > 0 ? '+' : '-') + '999.99%' : item.diff_r_pct_km.toFixed(2) + '%') : 'N/A',
-                    item.original_x_per_km.toFixed(6),
-                    item.jao_x_km_adjusted.toFixed(6),
-                    item.diff_x_pct_km ? (Math.abs(item.diff_x_pct_km) > 1000 ? (item.diff_x_pct_km > 0 ? '+' : '-') + '999.99%' : item.diff_x_pct_km.toFixed(2) + '%') : 'N/A',
-                    item.original_b_per_km.toExponential(6),
-                    item.jao_b_km_adjusted.toExponential(6),
-                    item.diff_b_pct_km ? (Math.abs(item.diff_b_pct_km) > 1000 ? (item.diff_b_pct_km > 0 ? '+' : '-') + '999.99%' : item.diff_b_pct_km.toFixed(2) + '%') : 'N/A'
-                ].forEach((text, index) => {
-                    const td = document.createElement('td');
-                    td.textContent = text;
-
-                    // Add color coding for difference percentages
-                    if (index === 6 || index === 9 || index === 12) { // R, X, B diff columns
-                        const pct = parseFloat(text);
-                        if (!isNaN(pct)) {
-                            if (Math.abs(pct) <= 20) {
-                                td.className = 'good-match';
-                            } else if (Math.abs(pct) <= 50) {
-                                td.className = 'moderate-match';
-                            } else {
-                                td.className = 'poor-match';
-                            }
-                        }
-                    }
-
-                    row.appendChild(td);
-                });
-
-                tbody.appendChild(row);
-            });
-        }
-
-        // Column filtering
-        function setupFilters() {
-            const inputs = document.querySelectorAll('.filters input');
-
-            inputs.forEach(input => {
-                input.addEventListener('keyup', function() {
-                    const column = parseInt(this.dataset.col);
-                    const value = this.value.toLowerCase();
-                    const tableId = this.closest('table').id;
-
-                    const rows = document.querySelectorAll('#' + tableId + ' tbody tr');
-                    rows.forEach(row => {
-                        const cell = row.querySelectorAll('td')[column];
-                        const text = cell.textContent.toLowerCase();
-
-                        // Check if row is already hidden by another filter
-                        const isHidden = row.style.display === 'none';
-
-                        // If filter is empty, don't hide based on this column
-                        if (value === '' && !isHidden) {
-                            row.style.display = '';
-                        } else if (text.includes(value)) {
-                            // If this filter matches and row isn't hidden by another filter
-                            if (!isHidden) {
-                                row.style.display = '';
-                            }
-                        } else {
-                            // This filter doesn't match, hide the row
-                            row.style.display = 'none';
-                        }
-                    });
-                });
-            });
-        }
-
-        // Tab switching
-        function showTable(tableId) {
-            document.getElementById('total-table').style.display = 'none';
-            document.getElementById('per-km-table').style.display = 'none';
-            document.getElementById(tableId).style.display = 'block';
-
-            // Update tab active state
-            document.querySelectorAll('.tab').forEach(tab => {
-                tab.classList.remove('active');
-            });
-
-            if (tableId === 'total-table') {
-                document.querySelectorAll('.tab')[0].classList.add('active');
-            } else {
-                document.querySelectorAll('.tab')[1].classList.add('active');
-            }
-        }
-
-        // Initialize when the page loads
-        document.addEventListener('DOMContentLoaded', function() {
-            // Create total value charts
-            createScatterPlot('r', 'r-scatter');
-            createScatterPlot('x', 'x-scatter');
-            createScatterPlot('b', 'b-scatter');
-
-            // Create PyPSA vs JAO comparison charts
-            createComparisonChart('r', 'r-comparison');
-            createComparisonChart('x', 'x-comparison');
-            createComparisonChart('b', 'b-comparison');
-
-            // Create per-km comparison charts
-            createPerKmChart('r', 'r-per-km');
-            createPerKmChart('x', 'x-per-km');
-            createPerKmChart('b', 'b-per-km');
-
-            // Initialize data tables
-            populateTable();
-            populatePerKmTable();
-            setupFilters();
+  function setupFilters(){
+    document.querySelectorAll('.filters input').forEach(inp=>{
+      inp.addEventListener('input', ()=>{
+        const table = inp.closest('table');
+        const col = +inp.dataset.col;
+        const val = inp.value.toLowerCase();
+        table.querySelectorAll('tbody tr').forEach(tr=>{
+          const cell = tr.children[col];
+          const txt = (cell?.textContent || '').toLowerCase();
+          tr.style.display = (val==='' || txt.includes(val)) ? '' : 'none';
         });
-    </script>
+      });
+    });
+  }
+
+  function showTable(id){
+    document.getElementById('tbl_tot').style.display = (id==='tbl_tot') ? 'block':'none';
+    document.getElementById('tbl_km').style.display  = (id==='tbl_km') ? 'block':'none';
+    const tabs = document.querySelectorAll('.tab');
+    tabs[0].classList.toggle('active', id==='tbl_tot');
+    tabs[1].classList.toggle('active', id==='tbl_km');
+  }
+
+  // -------- download buttons --------
+  function canvasToPngBlobWithWhiteBg(canvas, cb){
+    const w = canvas.width, h = canvas.height;
+    const tmp = document.createElement('canvas');
+    tmp.width = w; tmp.height = h;
+    const ctx = tmp.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0,0,w,h);
+    ctx.drawImage(canvas, 0, 0);
+    if (tmp.toBlob) tmp.toBlob(cb, 'image/png', 1);
+    else {
+      const uri = tmp.toDataURL('image/png');
+      const bstr = atob(uri.split(',')[1]);
+      const u8 = new Uint8Array(bstr.length);
+      for (let i=0;i<bstr.length;i++) u8[i] = bstr.charCodeAt(i);
+      cb(new Blob([u8], {type:'image/png'}));
+    }
+  }
+
+  function downloadCanvasPng(canvasId, filename){
+    const cv = document.getElementById(canvasId);
+    if (!cv) return;
+    canvasToPngBlobWithWhiteBg(cv, (blob)=>{
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = filename || (canvasId + '.png');
+      document.body.appendChild(a);
+      a.click();
+      URL.revokeObjectURL(a.href);
+      a.remove();
+    });
+  }
+
+  function bindDownloadButtons(){
+    document.querySelectorAll('.download-btn').forEach(btn=>{
+      btn.addEventListener('click', ()=>{
+        const target = btn.getAttribute('data-target');
+        downloadCanvasPng(target, target + '.png');
+      });
+    });
+  }
+
+  // -------- init --------
+  document.addEventListener('DOMContentLoaded', ()=>{
+    // totals
+    buildTotals('r', 'r_tot');
+    buildTotals('x', 'x_tot');
+    buildTotals('b', 'b_tot');
+
+    // per-km
+    buildPerKm('r', 'r_km');
+    buildPerKm('x', 'x_km');
+    buildPerKm('b', 'b_km');
+
+    // tables
+    fillTotalsTable();
+    fillPerKmTable();
+    setupFilters();
+    bindDownloadButtons();
+  });
+</script>
 </body>
 </html>
 """
 
-    # Format R values for display
-    r_value_text = {}
-    for param in ['r', 'x', 'b']:
-        if r_values[param]['r'] is not None:
-            r_value_text[param] = f"{r_values[param]['r']:.4f}"
-        else:
-            r_value_text[param] = "N/A"
+    # substitute data
+    html = html.replace("__DATA_JSON__", json.dumps(rows))
+    html = html.replace("__R_VALUES__", json.dumps(r_vals))
 
-    # Replace placeholders with actual data
-    html = html.replace("DATA_PLACEHOLDER", json.dumps(all_data))
-    html = html.replace("R_VALUES", json.dumps(r_value_text))
+    out_file = out_dir / "parameter_comparison.html"
+    out_file.write_text(html, encoding="utf-8")
+    print(f"Parameter comparison visualization saved to {out_file}")
+    return str(out_file)
 
-    # Write HTML file
-    output_file = output_path / "parameter_comparison.html"
-    with open(output_file, "w", encoding="utf-8") as f:
-        f.write(html)
 
-    print(f"Parameter comparison visualization saved to {output_file}")
-    return str(output_file)
+
+import pandas as pd
+from pathlib import Path
+
+def create_updated_pypsa_with_jao_params(
+    pypsa_csv: str,
+    jao_csv: str,
+    matches,                 # either a list[dict] from your matcher or a path to CSV
+    out_csv: str,
+    overwrite_s_nom: bool = False,   # set True if you want to REPLACE PyPSA s_nom by JAO values
+    add_eic: bool = True             # add EIC_Code to PyPSA when available
+):
+    """
+    Update a PyPSA transformer CSV by adding JAO electrical parameters for matched rows.
+
+    Creates columns:
+      - jao_s_nom, jao_r, jao_x, jao_b, jao_g
+      - (optionally) EIC_Code copied from JAO
+      - (optionally) overwrite s_nom with jao_s_nom
+
+    Args
+    ----
+    pypsa_csv : path to original pypsa_transformers.csv
+    jao_csv   : path to jao_transformers.csv
+    matches   : list of match dicts (from your pipeline) OR path to transformer_matches.csv
+    out_csv   : path to write the updated PyPSA CSV
+    overwrite_s_nom : if True, overwrite the existing PyPSA `s_nom` with JAO value
+    add_eic   : if True, write JAO EIC code into PyPSA column `EIC_Code`
+    """
+    pypsa_df = pd.read_csv(pypsa_csv)
+    jao_df   = pd.read_csv(jao_csv)
+
+    # Normalize keys (some JAO files vary slightly in column names)
+    # Required: r, x, b, g; Optional/guessed: s_nom
+    def find_col(df, candidates):
+        for c in candidates:
+            if c in df.columns:
+                return c
+        # case-insensitive fallback
+        lower_map = {c.lower(): c for c in df.columns}
+        for c in candidates:
+            if c.lower() in lower_map:
+                return lower_map[c.lower()]
+        return None
+
+    col_r = find_col(jao_df, ["r"])
+    col_x = find_col(jao_df, ["x"])
+    col_b = find_col(jao_df, ["b"])
+    col_g = find_col(jao_df, ["g"])
+    col_eic = find_col(jao_df, ["EIC_Code", "eic_code", "EIC", "eic"])
+
+    # Try to locate an apparent S (MVA) column
+    col_s = find_col(
+        jao_df,
+        ["s_nom", "S_nom", "Snom", "S_nom (MVA)", "Rated Power (MVA)", "Power (MVA)", "S (MVA)"]
+    )
+
+    # Coerce numeric where present
+    for c in [col_r, col_x, col_b, col_g, col_s]:
+        if c and c in jao_df.columns:
+            jao_df[c] = pd.to_numeric(jao_df[c], errors="coerce")
+
+    # Build a fast lookup for JAO rows by EIC and by name
+    jao_by_eic  = {}
+    if col_eic:
+        jao_by_eic = {str(v): row for v, row in jao_df.set_index(col_eic).iterrows() if pd.notna(v)}
+    jao_by_name = {str(row.get("name", "")): row for _, row in jao_df.iterrows() if str(row.get("name","")) != ""}
+
+    # Load matches (list or CSV)
+    if isinstance(matches, (str, Path)):
+        matches_df = pd.read_csv(matches)
+        # normalize column names we need
+        need_cols = {
+            "pypsa_id": ["pypsa_id", "transformer_id", "pypsa_transformer_id"],
+            "jao_id":   ["jao_id", "EIC_Code", "jao_eic", "jao_eic_code"],
+            "jao_name": ["jao_name", "name"]
+        }
+        def pick(src, options):
+            for o in options:
+                if o in src.columns:
+                    return o
+            return None
+
+        c_pypsa = pick(matches_df, need_cols["pypsa_id"])
+        c_jao   = pick(matches_df, need_cols["jao_id"])
+        c_jname = pick(matches_df, need_cols["jao_name"])
+
+        match_list = []
+        for _, r in matches_df.iterrows():
+            match_list.append({
+                "pypsa_id": str(r.get(c_pypsa, "")),
+                "jao_id":   (str(r.get(c_jao, "")) if c_jao else ""),
+                "jao_name": (str(r.get(c_jname, "")) if c_jname else "")
+            })
+    else:
+        # assume a list[dict] from your pipeline
+        match_list = [
+            {
+                "pypsa_id": str(m.get("pypsa_id", "")),
+                "jao_id":   str(m.get("jao_id", "")),
+                "jao_name": str(m.get("jao_name", "")),
+                # if your matcher already carries jao_r etc., we could also use those directly
+                "jao_r":    m.get("jao_r", None),
+                "jao_x":    m.get("jao_x", None),
+                "jao_b":    m.get("jao_b", None),
+                "jao_g":    m.get("jao_g", None),
+            }
+            for m in matches if bool(m.get("matched", False))
+        ]
+
+    # Ensure output columns exist on PyPSA side
+    for c in ["jao_s_nom", "jao_r", "jao_x", "jao_b", "jao_g"]:
+        if c not in pypsa_df.columns:
+            pypsa_df[c] = pd.NA
+    if add_eic and "EIC_Code" not in pypsa_df.columns:
+        pypsa_df["EIC_Code"] = pd.NA
+
+    # Index for fast row selection in PyPSA
+    if "transformer_id" not in pypsa_df.columns:
+        raise ValueError("PyPSA CSV must have a 'transformer_id' column.")
+
+    pypsa_df.set_index("transformer_id", inplace=True, drop=False)
+
+    # Apply updates for matched rows
+    updated = 0
+    for m in match_list:
+        pid = m.get("pypsa_id", "")
+        if not pid or pid not in pypsa_df.index:
+            continue
+
+        # Prefer values directly from the match dict if present; otherwise pull from JAO row
+        jao_row = None
+        if col_eic and str(m.get("jao_id","")) in jao_by_eic:
+            jao_row = jao_by_eic[str(m.get("jao_id",""))]
+        elif m.get("jao_name","") in jao_by_name:
+            jao_row = jao_by_name[m.get("jao_name","")]
+
+        # Resolve parameters
+        def get_val(key_from_match, jao_colname):
+            # 1) from match list if present
+            if key_from_match in m and m[key_from_match] is not None:
+                return m[key_from_match]
+            # 2) from JAO row if available
+            if jao_row is not None and jao_colname and jao_colname in jao_row:
+                return jao_row[jao_colname]
+            return None
+
+        v_r = get_val("jao_r", col_r)
+        v_x = get_val("jao_x", col_x)
+        v_b = get_val("jao_b", col_b)
+        v_g = get_val("jao_g", col_g)
+        v_s = (jao_row[col_s] if (jao_row is not None and col_s and col_s in jao_row) else None)
+
+        if pd.notna(v_r): pypsa_df.at[pid, "jao_r"] = pd.to_numeric(v_r, errors="coerce")
+        if pd.notna(v_x): pypsa_df.at[pid, "jao_x"] = pd.to_numeric(v_x, errors="coerce")
+        if pd.notna(v_b): pypsa_df.at[pid, "jao_b"] = pd.to_numeric(v_b, errors="coerce")
+        if pd.notna(v_g): pypsa_df.at[pid, "jao_g"] = pd.to_numeric(v_g, errors="coerce")
+        if pd.notna(v_s): pypsa_df.at[pid, "jao_s_nom"] = pd.to_numeric(v_s, errors="coerce")
+
+        if add_eic:
+            eid = m.get("jao_id", None)
+            if eid:
+                pypsa_df.at[pid, "EIC_Code"] = eid
+
+        if overwrite_s_nom and pd.notna(pypsa_df.at[pid, "jao_s_nom"]):
+            pypsa_df.at[pid, "s_nom"] = pypsa_df.at[pid, "jao_s_nom"]
+
+        updated += 1
+
+    # Final tidy: ensure numeric dtype where possible
+    for c in ["jao_s_nom", "jao_r", "jao_x", "jao_b", "jao_g", "s_nom"]:
+        if c in pypsa_df.columns:
+            pypsa_df[c] = pd.to_numeric(pypsa_df[c], errors="coerce")
+
+    # Write output
+    Path(out_csv).parent.mkdir(parents=True, exist_ok=True)
+    pypsa_df.to_csv(out_csv, index=False)
+    print(f"Updated {updated} PyPSA transformers with JAO parameters -> {out_csv}")

@@ -1,37 +1,50 @@
 def create_enhanced_summary_table(jao_gdf, pypsa_gdf, matching_results, output_dir=None):
     """
-    Create an HTML table summarizing electrical parameter allocation from JAO to PyPSA.
-    Safe against missing fields and unit mismatches (assumes JAO in km, PyPSA in m).
-    Includes total length statistics for matching quality assessment.
+    Build an HTML report summarising JAO→PyPSA parameter allocation, with:
+      • Robust voltage parsing (eligibility ≈ 220/225 kV and 380/400 kV buckets)
+      • JAO lengths on a route-km basis (JAO length assumed km; meters auto-detected)
+      • PyPSA lengths on a circuit-km basis (length[m] × circuits)
+      • Double-count protection for matched PyPSA totals across many-to-many matches
+      • Per-row parameter tables, circuit-aware per-km comparisons, and residual checks
+
+    Parameters
+    ----------
+    jao_gdf : GeoDataFrame
+    pypsa_gdf : GeoDataFrame
+    matching_results : list[dict]
+        Each dict may include:
+          - matched (bool)
+          - jao_id (str)
+          - pypsa_ids (list[str] or ";"-joined str)
+          - matched_lines_data (list[seg]) with seg fields:
+                network_id, length_km (km), num_parallel (circuits),
+                original_r/x/b, allocated_r/x/b, ...
+    output_dir : str | Path | None
+
+    Returns
+    -------
+    Path to generated HTML file.
     """
-    import os
     from pathlib import Path
+    import math
+    import re
     import pandas as pd
 
-    print("Creating enhanced parameter summary table...")
+    print("Creating enhanced parameter summary table…")
 
-    # Use provided output_dir or default to "output"
-    if output_dir is None:
-        out_dir = Path("output")
-    else:
-        out_dir = Path(output_dir)
+    # ------------------------ I/O ------------------------
+    out_dir = Path(output_dir) if output_dir is not None else Path("output")
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    out_dir.mkdir(exist_ok=True)
-
-    # ---- helpers ----
-    def meters_to_km(val):
-        try:
-            if val is None or pd.isna(val):
-                return None
-            return float(val) / 1000.0
-        except Exception:
-            return None
-
+    # ---------------------- helpers ---------------------
     def _sf(val, fmt=".6f", na="-"):
         try:
-            if val is None or (isinstance(val, float) and (val != val)):  # NaN check
+            if val is None:
                 return na
-            return f"{float(val):{fmt}}"
+            f = float(val)
+            if math.isnan(f):
+                return na
+            return f"{f:{fmt}}"
         except Exception:
             return na
 
@@ -44,567 +57,502 @@ def create_enhanced_summary_table(jao_gdf, pypsa_gdf, matching_results, output_d
         except Exception:
             return None
 
-    # ---- quick lookups ----
+    def _meters_to_km_pypsa(val):
+        # PyPSA 'length' is meters by definition → always divide by 1000
+        try:
+            return float(val) / 1000.0 if val is not None and not pd.isna(val) else 0.0
+        except Exception:
+            return 0.0
+
+    def _jao_len_km(row):
+        # JAO 'length' should be in km; if extremely large (looks like meters) → divide
+        try:
+            if "length" in row and row["length"] is not None:
+                lv = float(row["length"])
+                return lv / 1000.0 if lv > 1000 else lv
+            return float(row.get("length_km", 0.0) or 0.0)
+        except Exception:
+            return 0.0
+
+    def _circuits_of(val):
+        # circuits >= 1; if missing/invalid → 1
+        try:
+            c = float(val)
+            if math.isnan(c) or c < 1:
+                return 1.0
+            return c
+        except Exception:
+            return 1.0
+
+    def _coerce_voltage_kv_any(v):
+        """Extract max numeric from messy strings like '380/220 kV', '225,0', '400 kV – 220 kV', or raw 220000."""
+        if v is None:
+            return math.nan
+        s = str(v).strip().replace(",", ".")
+        s = re.sub(r"\s*[kK]\s*[vV]\b", "", s)  # drop 'kV'
+        nums = re.findall(r"\d+(?:\.\d+)?", s)
+        if not nums:
+            return math.nan
+        vals = []
+        for t in nums:
+            x = float(t)
+            # 220000 (V) → 220 (kV) if divisible by 1000
+            if x >= 1000 and abs(x / 1000.0 - round(x / 1000.0)) < 1e-6:
+                x = x / 1000.0
+            vals.append(x)
+        return max(vals) if vals else math.nan
+
+    def _eligible_voltage(v_kv):
+        # Standard EHV/HV buckets typically available for matching
+        if v_kv is None or (isinstance(v_kv, float) and math.isnan(v_kv)):
+            return False
+        return (200.0 <= v_kv < 260.0) or (360.0 <= v_kv <= 420.0)
+
+    def _diff_pct(a, b):
+        try:
+            b = float(b)
+            if b == 0:
+                return None
+            return 100.0 * (float(a) - b) / abs(b)
+        except Exception:
+            return None
+
+    # ------------------ lookups & ids -------------------
     jao_by_id = {str(r["id"]): r for _, r in jao_gdf.iterrows()}
-    pypsa_by_id = {str(r.get("line_id", r.get("id", ""))): r for _, r in pypsa_gdf.iterrows()}
+    pypsa_ids = []
+    pypsa_by_id = {}
+    for _, r in pypsa_gdf.iterrows():
+        pid = str(r.get("line_id", r.get("id", "")))
+        if pid and pid not in pypsa_by_id:
+            pypsa_by_id[pid] = r
+            pypsa_ids.append(pid)
 
-    # ---- IMPORTANT: Preprocess results to ensure allocation data is complete ----
-    def preprocess_results_for_visualization(results):
-        """Add electrical parameter allocation data to results if missing."""
-        processed_count = 0
-
-        for result in results:
-            if not result.get('matched', False):
+    # ---------------- preprocess results ----------------
+    def _preprocess(results):
+        processed = 0
+        for result in results or []:
+            if not result.get("matched", False):
                 continue
+            processed += 1
 
-            processed_count += 1
-
-            # Get JAO parameters
-            jao_id = str(result.get('jao_id', ''))
-            jao_row = jao_by_id.get(jao_id)
-
-            # Extract JAO parameters from source
-            if jao_row is not None:
-                jao_r_total = float(jao_row.get('r', 0) or 0)
-                jao_x_total = float(jao_row.get('x', 0) or 0)
-                jao_b_total = float(jao_row.get('b', 0) or 0)
-
-                if 'length' in jao_row and jao_row['length'] is not None:
-                    lv = float(jao_row['length'])
-                    jao_length_km = lv / 1000.0 if lv > 1000 else lv
-                else:
-                    jao_length_km = float(jao_row.get('length_km', 0) or 0)
+            # --- JAO totals & per-km
+            jao_id = str(result.get("jao_id", ""))
+            jrow = jao_by_id.get(jao_id)
+            if jrow is not None:
+                jao_r_total = float(jrow.get("r", 0) or 0)
+                jao_x_total = float(jrow.get("x", 0) or 0)
+                jao_b_total = float(jrow.get("b", 0) or 0)
+                jao_length_km = _jao_len_km(jrow)
             else:
-                # Use values from the result
-                jao_r_total = float(result.get('jao_r', 0) or 0)
-                jao_x_total = float(result.get('jao_x', 0) or 0)
-                jao_b_total = float(result.get('jao_b', 0) or 0)
-                jao_length_km = float(result.get('jao_length_km', 0) or 0)
+                jao_r_total = float(result.get("jao_r", 0) or 0)
+                jao_x_total = float(result.get("jao_x", 0) or 0)
+                jao_b_total = float(result.get("jao_b", 0) or 0)
+                jao_length_km = float(result.get("jao_length_km", 0) or 0)
 
-            # Calculate per-km values
-            jao_r_km = jao_r_total / jao_length_km if jao_length_km > 0 else 0
-            jao_x_km = jao_x_total / jao_length_km if jao_length_km > 0 else 0
-            jao_b_km = jao_b_total / jao_length_km if jao_length_km > 0 else 0
+            jao_r_km = jao_r_total / jao_length_km if jao_length_km > 0 else 0.0
+            jao_x_km = jao_x_total / jao_length_km if jao_length_km > 0 else 0.0
+            jao_b_km = jao_b_total / jao_length_km if jao_length_km > 0 else 0.0
 
-            # Store JAO parameters in result
-            result['jao_r'] = jao_r_total
-            result['jao_x'] = jao_x_total
-            result['jao_b'] = jao_b_total
-            result['jao_length_km'] = jao_length_km
+            result["jao_r"] = jao_r_total
+            result["jao_x"] = jao_x_total
+            result["jao_b"] = jao_b_total
+            result["jao_length_km"] = jao_length_km
 
-            # Process matched_lines_data
-            segs = result.get('matched_lines_data', [])
-
-            # If no segments, create them from pypsa_ids
+            # --- segments
+            segs = result.get("matched_lines_data") or []
             if not segs:
                 segs = []
-                pypsa_ids = result.get('pypsa_ids', [])
-                if isinstance(pypsa_ids, str):
-                    pypsa_ids = [id.strip() for id in pypsa_ids.split(';') if id.strip()]
+                pids = result.get("pypsa_ids", [])
+                if isinstance(pids, str):
+                    pids = [p.strip() for p in pids.split(";") if p.strip()]
+                for pid in pids:
+                    prow = pypsa_by_id.get(str(pid))
+                    if prow is None:
+                        continue
+                    segs.append({
+                        "network_id": str(pid),
+                        "length_km": _meters_to_km_pypsa(prow.get("length", 0.0)),
+                        "num_parallel": int(prow.get("circuits", 1) or 1),
+                        "allocation_status": "Applied",
+                        "original_r": float(prow.get("r", 0) or 0),
+                        "original_x": float(prow.get("x", 0) or 0),
+                        "original_b": float(prow.get("b", 0) or 0),
+                    })
+                result["matched_lines_data"] = segs
 
-                for pypsa_id in pypsa_ids:
-                    pypsa_id = str(pypsa_id)
-                    prow = pypsa_by_id.get(pypsa_id)
-                    if prow is not None:
-                        # Create segment entry
-                        length = float(prow.get('length', 0) or 0)
-                        # Convert to km if in meters
-                        length_km = length / 1000.0 if length > 1000 else length
-                        circuits = int(prow.get('circuits', 1) or 1)
-                        r = float(prow.get('r', 0) or 0)
-                        x = float(prow.get('x', 0) or 0)
-                        b = float(prow.get('b', 0) or 0)
-
-                        segment = {
-                            'network_id': pypsa_id,
-                            'length_km': length_km,
-                            'num_parallel': circuits,
-                            'allocation_status': 'Applied',
-                            'original_r': r,
-                            'original_x': x,
-                            'original_b': b
-                        }
-                        segs.append(segment)
-
-                result['matched_lines_data'] = segs
-
-            # Convert lengths to km if in meters
+            # ensure km + original params
             for seg in segs:
-                length = float(seg.get('length_km', 0) or 0)
-                if length > 1000:  # Likely in meters
-                    seg['length_km'] = length / 1000.0
-
-            # First, ensure all segments have original parameters
-            for seg in segs:
-                # Ensure original parameter values are present
-                if 'original_r' not in seg or 'original_x' not in seg or 'original_b' not in seg:
-                    pypsa_id = str(seg.get('network_id', ''))
-                    prow = pypsa_by_id.get(pypsa_id)
+                L = float(seg.get("length_km", 0) or 0.0)
+                # if a stray meter value slipped in, convert
+                if L > 1000:
+                    seg["length_km"] = L / 1000.0
+                pid = str(seg.get("network_id", ""))
+                if "original_r" not in seg or "original_x" not in seg or "original_b" not in seg:
+                    prow = pypsa_by_id.get(pid)
                     if prow is not None:
-                        seg['original_r'] = float(prow.get('r', 0) or 0)
-                        seg['original_x'] = float(prow.get('x', 0) or 0)
-                        seg['original_b'] = float(prow.get('b', 0) or 0)
+                        seg["original_r"] = float(prow.get("r", 0) or 0)
+                        seg["original_x"] = float(prow.get("x", 0) or 0)
+                        seg["original_b"] = float(prow.get("b", 0) or 0)
 
-            # Calculate total length for allocation
-            total_pypsa_length_km = sum(float(seg.get('length_km', 0) or 0) for seg in segs)
-
-            # Now allocate parameters based on length proportion and circuits
-            if total_pypsa_length_km > 0 and segs:
-                # Reset allocation sums for verification
-                alloc_r_sum = 0.0
-                alloc_x_sum = 0.0
-                alloc_b_sum = 0.0
-
+            # allocate JAO totals to segments (length share; circuits reduce series R/X; circuits multiply B)
+            total_len_km = sum(float(s.get("length_km", 0) or 0.0) for s in segs)
+            if total_len_km > 0 and segs:
+                ar = ax = ab = 0.0
                 for seg in segs:
-                    length_km = float(seg.get('length_km', 0) or 0)
-                    circuits = int(seg.get('num_parallel', 1) or 1)
+                    Lk = float(seg.get("length_km", 0.0) or 0.0)
+                    cir = int(seg.get("num_parallel", 1) or 1)
+                    w = Lk / total_len_km
+                    seg["allocated_r"] = jao_r_total * w / cir
+                    seg["allocated_x"] = jao_x_total * w / cir
+                    seg["allocated_b"] = jao_b_total * w * cir
+                    seg["allocated_r_per_km"] = jao_r_km / cir if jao_length_km > 0 else 0.0
+                    seg["allocated_x_per_km"] = jao_x_km / cir if jao_length_km > 0 else 0.0
+                    seg["allocated_b_per_km"] = jao_b_km * cir if jao_length_km > 0 else 0.0
+                    ar += seg["allocated_r"]; ax += seg["allocated_x"]; ab += seg["allocated_b"]
+                result["allocated_r_sum"] = ar
+                result["allocated_x_sum"] = ax
+                result["allocated_b_sum"] = ab
 
-                    # Calculate length proportion
-                    length_proportion = length_km / total_pypsa_length_km
+        print(f"Preprocessed {processed} matched results with allocation.")
+        return results or []
 
-                    # Calculate allocated parameters
-                    # For series elements (R, X): Divide by number of circuits (parallel paths reduce impedance)
-                    # For parallel elements (B): Multiply by number of circuits (parallel paths increase admittance)
-                    allocated_r = jao_r_total * length_proportion / circuits
-                    allocated_x = jao_x_total * length_proportion / circuits
-                    allocated_b = jao_b_total * length_proportion * circuits
+    matching_results = _preprocess(matching_results)
 
-                    # Store allocated parameters in segment
-                    seg['allocated_r'] = allocated_r
-                    seg['allocated_x'] = allocated_x
-                    seg['allocated_b'] = allocated_b
+    # --------------- eligibility by voltage ---------------
+    eligible_pypsa_ids = set()
+    seen = set()
+    for pid, row in pypsa_by_id.items():
+        if pid in seen:
+            continue
+        seen.add(pid)
+        v = _coerce_voltage_kv_any(row.get("voltage", row.get("v_nom", None)))
+        if _eligible_voltage(v):
+            eligible_pypsa_ids.add(pid)
 
-                    # Also store per-km values
-                    seg['allocated_r_per_km'] = jao_r_km / circuits
-                    seg['allocated_x_per_km'] = jao_x_km / circuits
-                    seg['allocated_b_per_km'] = jao_b_km * circuits
-
-                    # Add to allocation sums
-                    alloc_r_sum += allocated_r
-                    alloc_x_sum += allocated_x
-                    alloc_b_sum += allocated_b
-
-                # Store allocation sums in result
-                result['allocated_r_sum'] = alloc_r_sum
-                result['allocated_x_sum'] = alloc_x_sum
-                result['allocated_b_sum'] = alloc_b_sum
-
-        print(f"Preprocessed {processed_count} matched results with parameter allocation")
-        return results
-
-    # Preprocess to ensure all parameters are available
-    matching_results = preprocess_results_for_visualization(matching_results)
-
-    # ---- count statistics ----
-    # Modify the line count statistics section to filter by eligible voltage levels
+    # -------- counts (eligible PyPSA only for fairness) --------
     total_jao = len(jao_gdf)
+    total_pypsa = len(eligible_pypsa_ids)
 
-    # Filter PyPSA count to only include lines eligible for matching (220kV, 380kV, 400kV)
-    eligible_pypsa = 0
-    for _, row in pypsa_gdf.iterrows():
-        voltage = row.get('voltage', row.get('v_nom', 0))
-        # Only count lines that are eligible for matching (typically 220kV and 380/400kV)
-        if voltage in [220, 380, 400]:
-            eligible_pypsa += 1
-
-    # Use eligible_pypsa instead of total_pypsa for the statistics
-    total_pypsa = eligible_pypsa  # This represents lines that could be matched
-
-    matched_jao = sum(1 for r in (matching_results or []) if r.get("matched", False))
-
+    matched_jao = sum(1 for r in matching_results if r.get("matched", False))
     matched_pypsa_ids = set()
-    for r in (matching_results or []):
-        if r.get("matched", False) and r.get("pypsa_ids"):
-            ids = r["pypsa_ids"]
-            if isinstance(ids, str):
-                ids = [p.strip() for p in ids.split(";") if p.strip()]
-            matched_pypsa_ids.update(map(str, ids))
+    for r in matching_results:
+        if not r.get("matched", False):
+            continue
+        ids = r.get("pypsa_ids", [])
+        if isinstance(ids, str):
+            ids = [p.strip() for p in ids.split(";") if p.strip()]
+        for pid in ids:
+            spid = str(pid)
+            if spid in eligible_pypsa_ids:
+                matched_pypsa_ids.add(spid)
     matched_pypsa = len(matched_pypsa_ids)
 
-    # ---- length statistics ----
-    # Calculate total lengths for JAO and PyPSA networks
+    # ------------------ length statistics ------------------
+    # JAO route-km
     total_jao_length_km = 0.0
     for _, row in jao_gdf.iterrows():
-        if "length" in row and row["length"] is not None:
-            lv = float(row["length"])
-            jao_length = lv / 1000.0 if lv > 1000 else lv
-        else:
-            jao_length = float(row.get("length_km", 0) or 0)
-        total_jao_length_km += jao_length
+        total_jao_length_km += _jao_len_km(row)
 
-    # Track which PyPSA lines have already been counted in matched calculations
-    # to prevent double-counting when the same line is matched multiple times
-    matched_pypsa_line_counter = {}
+    # PyPSA circuit-km (eligible only)
+    total_pypsa_length_ckm = 0.0
+    for pid in eligible_pypsa_ids:
+        prow = pypsa_by_id.get(pid)
+        if prow is None:
+            continue
+        L_km = _meters_to_km_pypsa(prow.get("length", None))
+        cir = _circuits_of(prow.get("circuits", 1))
+        total_pypsa_length_ckm += L_km * cir
 
-    # First calculate total PyPSA length (physical, regardless of circuits)
-    total_pypsa_length_km = 0.0
-    for _, row in pypsa_gdf.iterrows():
-        pypsa_id = str(row.get("line_id", row.get("id", "")))
-        pypsa_length = meters_to_km(row.get("length", None)) or 0.0
-        total_pypsa_length_km += pypsa_length
-        # Initialize matched length counter for this line
-        matched_pypsa_line_counter[pypsa_id] = 0.0
+    # Matched totals (avoid double-counting PyPSA circuit-km across many matches)
+    matched_jao_length_km = 0.0                # route-km
+    matched_pypsa_length_ckm = 0.0             # circuit-km
+    consumed_ckm_by_pid = {pid: 0.0 for pid in eligible_pypsa_ids}
 
-    # Calculate matched lengths
-    matched_jao_length_km = 0.0
-    matched_pypsa_length_km = 0.0
-
-    for result in (matching_results or []):
+    for result in matching_results:
         if not result.get("matched", False):
             continue
 
-        # Add JAO matched length
-        jao_id = str(result.get("jao_id", ""))
-        jao_row = jao_by_id.get(jao_id)
-        if jao_row is not None:
-            if "length" in jao_row and jao_row["length"] is not None:
-                lv = float(jao_row["length"])
-                jao_length_km = lv / 1000.0 if lv > 1000 else lv
-            else:
-                jao_length_km = float(jao_row.get("length_km", 0) or 0)
-        else:
-            jao_length_km = float(result.get("jao_length_km", 0) or 0)
+        # JAO side (route-km)
+        jrow = jao_by_id.get(str(result.get("jao_id", "")))
+        matched_jao_length_km += _jao_len_km(jrow) if jrow is not None else float(result.get("jao_length_km", 0) or 0.0)
 
-        matched_jao_length_km += jao_length_km
-
-        # Add PyPSA matched length without double-counting
+        # PyPSA side (circuit-km per id with cap)
         segs = result.get("matched_lines_data") or []
-        if segs:
-            for seg in segs:
-                pid = str(seg.get("network_id", ""))
-                prow = pypsa_by_id.get(pid)
+        pids = [str(s.get("network_id", "")) for s in segs] if segs else result.get("pypsa_ids", [])
+        if isinstance(pids, str):
+            pids = [p.strip() for p in pids.split(";") if p.strip()]
+        for pid in pids or []:
+            spid = str(pid)
+            if spid not in eligible_pypsa_ids:
+                continue
+            prow = pypsa_by_id.get(spid)
+            if prow is not None:
+                L_km = _meters_to_km_pypsa(prow.get("length", None))
+                cir = _circuits_of(prow.get("circuits", 1))
+                available_ckm = L_km * cir
+            else:
+                # Fallback: use seg-provided numbers
+                L_km = 0.0; cir = 1.0
+                for s in segs:
+                    if str(s.get("network_id", "")) == spid:
+                        L_km = float(s.get("length_km", 0.0) or 0.0)
+                        cir = _circuits_of(s.get("num_parallel", 1))
+                        break
+                available_ckm = L_km * cir
 
-                if prow is not None:
-                    km = meters_to_km(prow.get("length", None)) or 0.0
-                    circuits = int(prow.get("circuits", 1) or 1)
+            remaining = max(0.0, available_ckm - consumed_ckm_by_pid.get(spid, 0.0))
+            take = min(remaining, available_ckm)
+            if take > 0:
+                consumed_ckm_by_pid[spid] = consumed_ckm_by_pid.get(spid, 0.0) + take
+                matched_pypsa_length_ckm += take
 
-                    # Calculate the portion of this line being used by this match
-                    # Don't add more than the physical length (adjusted for remaining circuits)
-                    remaining_length = km - matched_pypsa_line_counter.get(pid, 0.0)
-                    if remaining_length > 0:
-                        allocated_length = min(remaining_length, km)
-                        matched_pypsa_line_counter[pid] += allocated_length
-                        matched_pypsa_length_km += allocated_length
-                else:
-                    # If we can't find the line in pypsa_by_id, use the segment length
-                    km = float(seg.get("length_km", 0) or 0.0)
-                    if pid not in matched_pypsa_line_counter:
-                        matched_pypsa_line_counter[pid] = 0.0
+    # Percentages (note different denominators!)
+    jao_length_pct = _safe_pct(matched_jao_length_km, total_jao_length_km)                 # route-km basis
+    pypsa_length_pct = _safe_pct(matched_pypsa_length_ckm, total_pypsa_length_ckm)         # circuit-km basis
 
-                    remaining_length = km - matched_pypsa_line_counter.get(pid, 0.0)
-                    if remaining_length > 0:
-                        allocated_length = min(remaining_length, km)
-                        matched_pypsa_line_counter[pid] += allocated_length
-                        matched_pypsa_length_km += allocated_length
-        else:
-            # FALLBACK: If no segment data, use pypsa_ids directly
-            pypsa_ids = result.get('pypsa_ids', [])
-            if isinstance(pypsa_ids, str):
-                pypsa_ids = [id.strip() for id in pypsa_ids.split(';') if id.strip()]
-
-            for pypsa_id in pypsa_ids:
-                pypsa_id = str(pypsa_id)
-                prow = pypsa_by_id.get(pypsa_id)
-
-                if prow is not None:
-                    km = meters_to_km(prow.get("length", None)) or 0.0
-                    circuits = int(prow.get("circuits", 1) or 1)
-
-                    # Similar logic to avoid double-counting
-                    remaining_length = km - matched_pypsa_line_counter.get(pypsa_id, 0.0)
-                    if remaining_length > 0:
-                        allocated_length = min(remaining_length, km)
-                        matched_pypsa_line_counter[pypsa_id] += allocated_length
-                        matched_pypsa_length_km += allocated_length
-
-    # Calculate percentages
-    jao_length_pct = _safe_pct(matched_jao_length_km, total_jao_length_km)
-    pypsa_length_pct = _safe_pct(matched_pypsa_length_km, total_pypsa_length_km)
-
-    # ---- HTML header ----
+    # ---------------------- HTML -------------------------
     html = f"""<!DOCTYPE html>
 <html>
 <head>
-  <title>JAO-PyPSA Electrical Parameter Allocation</title>
+  <meta charset="utf-8"/>
+  <title>JAO → PyPSA Allocation Summary</title>
   <style>
     body {{ font-family: Arial, sans-serif; margin: 20px; }}
     h1, h2, h3 {{ color: #333; }}
-    .summary {{ margin-bottom: 20px; padding: 15px; background-color: #f5f5f5; border-radius: 5px; }}
-    .stats-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 15px; }}
-    .stats-card {{ background-color: white; padding: 15px; border-radius: 5px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }}
-    .stats-title {{ font-size: 16px; font-weight: bold; margin-bottom: 10px; color: #4CAF50; }}
-    .stat-row {{ display: flex; justify-content: space-between; margin-bottom: 5px; }}
-    .stat-label {{ color: #555; }}
-    .stat-value {{ font-weight: bold; }}
-    .progress-bar-container {{ width: 100%; height: 20px; background-color: #e0e0e0; border-radius: 10px; margin-top: 5px; overflow: hidden; }}
-    .progress-bar {{ height: 100%; background-color: #4CAF50; border-radius: 10px; }}
-    table {{ border-collapse: collapse; width: 100%; margin-top: 20px; margin-bottom: 30px; }}
-    th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
-    th {{ background-color: #4CAF50; color: white; }}
-    .filter-controls {{ margin: 20px 0; padding: 10px; background-color: #eee; border-radius: 5px; }}
-    .toggle-btn {{ background-color: #4CAF50; color: white; padding: 5px 10px; border: none; border-radius: 4px; cursor: pointer; margin-bottom: 10px; }}
-    .details-section {{ display: none; }}
-    .good-match {{ background-color: #c8e6c9; }}
-    .moderate-match {{ background-color: #fff9c4; }}
-    .poor-match {{ background-color: #ffccbc; }}
-    .debug-info {{ font-family: monospace; font-size: 12px; color: #555; background-color: #f9f9f9; padding: 8px; margin-bottom: 10px; border-radius: 3px; display: none; }}
-    .show-debug {{ cursor: pointer; color: #0066cc; margin-bottom: 5px; }}
-    .show-debug:hover {{ text-decoration: underline; }}
+    .summary {{ margin-bottom: 20px; padding: 15px; background: #f5f7fb; border-radius: 6px; }}
+    .stats-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }}
+    .card {{ background: #fff; border-radius: 6px; box-shadow: 0 2px 5px rgba(0,0,0,.08); padding: 14px; }}
+    .k {{ display:flex; justify-content:space-between; margin:6px 0; }}
+    .label {{ color:#555; }}
+    .val {{ font-weight: 700; }}
+    .bar-outer {{ height: 16px; background:#eaeef6; border-radius: 10px; overflow:hidden; }}
+    .bar {{ height:100%; background:#4CAF50; }}
+    table {{ border-collapse: collapse; width: 100%; margin-top: 18px; }}
+    th, td {{ border: 1px solid #e3e7f0; padding: 8px; text-align: left; }}
+    th {{ background: #4CAF50; color: #fff; position: sticky; top: 0; }}
+    .btn {{ background:#4CAF50; color:#fff; border:none; border-radius:4px; padding:6px 10px; cursor:pointer; }}
+    .details {{ display:none; }}
+    .good {{ background:#e8f5e9; }}
+    .mod  {{ background:#fff9c4; }}
+    .poor {{ background:#ffebee; }}
+    .debug {{ font-family:monospace; font-size:12px; background:#f9fafc; padding:8px; border-radius:4px; display:none; }}
+    .muted {{ color:#666; font-size: 12px; }}
   </style>
   <script>
     function filterTable() {{
       const q = document.getElementById('filter').value.toLowerCase();
       const rows = document.getElementById('resultsTable').getElementsByTagName('tr');
-      for (let i=1; i<rows.length; i++) {{
+      for (let i=1;i<rows.length;i++) {{
         rows[i].style.display = rows[i].textContent.toLowerCase().includes(q) ? '' : 'none';
       }}
     }}
     function toggleDetails(id) {{
-      const details = document.getElementById('details-'+id);
-      const btn = document.getElementById('btn-'+id);
-      const open = details.style.display === 'block';
-      details.style.display = open ? 'none' : 'block';
-      btn.textContent = open ? 'Show Parameters' : 'Hide Parameters';
+      const el = document.getElementById('d-'+id);
+      const open = el.style.display === 'block';
+      el.style.display = open ? 'none' : 'block';
+      document.getElementById('b-'+id).textContent = open ? 'Show Parameters' : 'Hide Parameters';
     }}
-    function toggleDebugInfo(id) {{
-      const el = document.getElementById('debug-'+id);
+    function toggleDebug(id) {{
+      const el = document.getElementById('g-'+id);
       el.style.display = el.style.display === 'block' ? 'none' : 'block';
     }}
   </script>
 </head>
 <body>
-  <h1>JAO-PyPSA Electrical Parameter Allocation</h1>
+  <h1>JAO → PyPSA Electrical Parameter Allocation</h1>
 
   <div class="summary">
     <h2>Matching Summary</h2>
-
     <div class="stats-grid">
-      <div class="stats-card">
-        <div class="stats-title">Line Count Statistics</div>
-        <div class="stat-row">
-          <span class="stat-label">JAO Lines:</span>
-          <span class="stat-value">{total_jao} (Matched: {matched_jao}, {_safe_pct(matched_jao, max(1, total_jao)):.1f}%)</span>
-        </div>
-        <div class="progress-bar-container">
-          <div class="progress-bar" style="width: {_safe_pct(matched_jao, max(1, total_jao)):.1f}%"></div>
-        </div>
-
-        <div class="stat-row" style="margin-top: 15px;">
-  <span class="stat-label">PyPSA Lines:</span>
-  <span class="stat-value">{total_pypsa} (Matched: {matched_pypsa}, {_safe_pct(matched_pypsa, max(1, total_pypsa)):.1f}%)</span>
-</div>
-        <div class="progress-bar-container">
-          <div class="progress-bar" style="width: {_safe_pct(matched_pypsa, max(1, total_pypsa)):.1f}%"></div>
-        </div>
+      <div class="card">
+        <div class="k"><span class="label">JAO Lines:</span><span class="val">{total_jao} (Matched: {matched_jao}, {_sf(_safe_pct(matched_jao, max(1, total_jao)), '.1f')}%)</span></div>
+        <div class="bar-outer"><div class="bar" style="width:{_sf(_safe_pct(matched_jao, max(1, total_jao)), '.1f')}%"></div></div>
+        <div class="k" style="margin-top:12px;"><span class="label">PyPSA Lines (eligible):</span><span class="val">{total_pypsa} (Matched: {matched_pypsa}, {_sf(_safe_pct(matched_pypsa, max(1, total_pypsa)), '.1f')}%)</span></div>
+        <div class="bar-outer"><div class="bar" style="width:{_sf(_safe_pct(matched_pypsa, max(1, total_pypsa)), '.1f')}%"></div></div>
       </div>
 
-      <div class="stats-card">
-        <div class="stats-title">Length Coverage Statistics</div>
-        <div class="stat-row">
-          <span class="stat-label">JAO Total Length:</span>
-          <span class="stat-value">{_sf(total_jao_length_km, '.1f')} km</span>
-        </div>
-        <div class="stat-row">
-          <span class="stat-label">JAO Matched Length:</span>
-          <span class="stat-value">{_sf(matched_jao_length_km, '.1f')} km ({_sf(jao_length_pct, '.1f')}%)</span>
-        </div>
-        <div class="progress-bar-container">
-          <div class="progress-bar" style="width: {_sf(jao_length_pct, '.1f')}%"></div>
-        </div>
-
-        <div class="stat-row" style="margin-top: 15px;">
-          <span class="stat-label">PyPSA Total Length:</span>
-          <span class="stat-value">{_sf(total_pypsa_length_km, '.1f')} km</span>
-        </div>
-        <div class="stat-row">
-          <span class="stat-label">PyPSA Matched Length:</span>
-          <span class="stat-value">{_sf(matched_pypsa_length_km, '.1f')} km ({_sf(pypsa_length_pct, '.1f')}%)</span>
-        </div>
-        <div class="progress-bar-container">
-          <div class="progress-bar" style="width: {_sf(pypsa_length_pct, '.1f')}%"></div>
-        </div>
+      <div class="card">
+        <div class="k"><span class="label">JAO Total Length (route-km):</span><span class="val">{_sf(total_jao_length_km, '.1f')} km</span></div>
+        <div class="k"><span class="label">JAO Matched (route-km):</span><span class="val">{_sf(matched_jao_length_km, '.1f')} km ({_sf(jao_length_pct, '.1f')}%)</span></div>
+        <div class="bar-outer"><div class="bar" style="width:{_sf(jao_length_pct, '.1f')}%"></div></div>
+        <div class="k" style="margin-top:12px;"><span class="label">PyPSA Total Length (circuit-km):</span><span class="val">{_sf(total_pypsa_length_ckm, '.1f')} km</span></div>
+        <div class="k"><span class="label">PyPSA Matched (circuit-km):</span><span class="val">{_sf(matched_pypsa_length_ckm, '.1f')} km ({_sf(pypsa_length_pct, '.1f')}%)</span></div>
+        <div class="bar-outer"><div class="bar" style="width:{_sf(pypsa_length_pct, '.1f')}%"></div></div>
       </div>
     </div>
-
-    <p><strong>Note:</strong> JAO lengths are treated as km; PyPSA lengths are converted from meters to km for display.</p>
+    <p class="muted"><b>Note:</b> JAO lengths are treated as <i>route-km</i>. PyPSA lengths are computed as <i>circuit-km</i> = length[m]/1000 × circuits. Eligibility uses voltage buckets around 220/225 kV and 380/400 kV.</p>
   </div>
 
-  <div class="filter-controls">
+  <div>
     <h2>Filter Results</h2>
-    <input type="text" id="filter" onkeyup="filterTable()" placeholder="Search for lines...">
+    <input type="text" id="filter" onkeyup="filterTable()" placeholder="Search…">
   </div>
 
   <h2>Parameter Allocation Results</h2>
   <table id="resultsTable">
     <tr>
-      <th>JAO ID</th><th>JAO Name</th><th>Voltage (kV)</th>
-      <th>PyPSA IDs</th><th>JAO Length (km)</th><th>PyPSA Length (km)</th>
-      <th>Coverage (%)</th><th>Parameters</th>
+      <th>JAO ID</th>
+      <th>JAO Name</th>
+      <th>Voltage (kV)</th>
+      <th>PyPSA IDs</th>
+      <th>JAO Length (route-km)</th>
+      <th>PyPSA Length (circuit-km)</th>
+      <th>Ratio (ckm / rkm)</th>
+      <th>Parameters</th>
     </tr>
 """
 
-    # ---- rows ----
-    row_counter = 0
-    for result in (matching_results or []):
+    # --------------------- table rows ---------------------
+    row_idx = 0
+    for result in matching_results:
         if not result.get("matched", False):
             continue
 
-        row_counter += 1
+        row_idx += 1
         jao_id = str(result.get("jao_id", ""))
-        jao_row = jao_by_id.get(jao_id)
-        if jao_row is not None:
-            jao_name = jao_row.get("NE_name", "")
-            voltage = jao_row.get("v_nom", "")
-            # length in km (source of truth)
-            if "length" in jao_row and jao_row["length"] is not None:
-                # JAO in km unless absurd
-                lv = float(jao_row["length"])
-                jao_length_km = lv / 1000.0 if lv > 1000 else lv
-            else:
-                jao_length_km = float(jao_row.get("length_km", 0) or 0)
-            jao_r_total = float(jao_row.get("r", 0) or 0)
-            jao_x_total = float(jao_row.get("x", 0) or 0)
-            jao_b_total = float(jao_row.get("b", 0) or 0)
+        jrow = jao_by_id.get(jao_id)
+        if jrow is not None:
+            jao_name = jrow.get("NE_name", "")
+            v_disp = jrow.get("v_nom", jrow.get("voltage", ""))
+            jao_len = _jao_len_km(jrow)
+            jao_r_total = float(jrow.get("r", 0) or 0)
+            jao_x_total = float(jrow.get("x", 0) or 0)
+            jao_b_total = float(jrow.get("b", 0) or 0)
         else:
             jao_name = result.get("jao_name", "")
-            voltage = result.get("v_nom", "")
-            jao_length_km = float(result.get("jao_length_km", 0) or 0)
+            v_disp = result.get("v_nom", "")
+            jao_len = float(result.get("jao_length_km", 0) or 0.0)
             jao_r_total = float(result.get("jao_r", 0) or 0)
             jao_x_total = float(result.get("jao_x", 0) or 0)
             jao_b_total = float(result.get("jao_b", 0) or 0)
 
-        jao_r_km = (jao_r_total / jao_length_km) if jao_length_km > 0 else 0.0
-        jao_x_km = (jao_x_total / jao_length_km) if jao_length_km > 0 else 0.0
-        jao_b_km = (jao_b_total / jao_length_km) if jao_length_km > 0 else 0.0
+        jao_r_km = (jao_r_total / jao_len) if jao_len > 0 else 0.0
+        jao_x_km = (jao_x_total / jao_len) if jao_len > 0 else 0.0
+        jao_b_km = (jao_b_total / jao_len) if jao_len > 0 else 0.0
 
-        # pypsa ids string
-        pypsa_ids = result.get("pypsa_ids", [])
-        if isinstance(pypsa_ids, str):
-            pypsa_ids = [p.strip() for p in pypsa_ids.split(";") if p.strip()]
-        pypsa_ids_str = ", ".join(map(str, pypsa_ids))
+        # PyPSA id list
+        pids = result.get("pypsa_ids", [])
+        if isinstance(pids, str):
+            pids = [p.strip() for p in pids.split(";") if p.strip()]
+        pids_str = ", ".join(map(str, pids))
 
-        # sum of matched PyPSA km from source data
-        total_pypsa_km = 0.0
+        # Per-row PyPSA circuit-km (don’t cap here; capping only done in global matched totals)
         segs = result.get("matched_lines_data") or []
+        pypsa_ckm_row = 0.0
         if segs:
             for seg in segs:
                 pid = str(seg.get("network_id", ""))
                 prow = pypsa_by_id.get(pid)
                 if prow is not None:
-                    km = meters_to_km(prow.get("length", None))
-                    total_pypsa_km += (km or 0.0)
+                    L_km = _meters_to_km_pypsa(prow.get("length", None))
+                    cir = _circuits_of(prow.get("circuits", 1))
                 else:
-                    total_pypsa_km += float(seg.get("length_km", 0) or 0.0)
+                    L_km = float(seg.get("length_km", 0.0) or 0.0)
+                    cir = _circuits_of(seg.get("num_parallel", 1))
+                pypsa_ckm_row += L_km * cir
         else:
-            # NEW: if segments haven't been materialized yet, sum by pypsa_ids
-            for pid in (pypsa_ids or []):
+            for pid in pids or []:
                 prow = pypsa_by_id.get(str(pid))
-                if prow is not None:
-                    km = meters_to_km(prow.get("length", None))
-                    total_pypsa_km += (km or 0.0)
+                if prow is None:
+                    continue
+                L_km = _meters_to_km_pypsa(prow.get("length", None))
+                cir = _circuits_of(prow.get("circuits", 1))
+                pypsa_ckm_row += L_km * cir
 
-        coverage = _safe_pct(total_pypsa_km, jao_length_km)
+        ratio_ckm_rkm = (pypsa_ckm_row / jao_len) if jao_len > 0 else None
 
         html += f"""
     <tr>
       <td>{jao_id}</td>
       <td>{jao_name}</td>
-      <td>{voltage}</td>
-      <td>{pypsa_ids_str}</td>
-      <td>{_sf(jao_length_km, '.2f')}</td>
-      <td>{_sf(total_pypsa_km, '.2f')}</td>
-      <td>{_sf(coverage, '.1f')}%</td>
-      <td><button id="btn-{row_counter}" class="toggle-btn" onclick="toggleDetails('{row_counter}')">Show Parameters</button></td>
+      <td>{v_disp}</td>
+      <td>{pids_str}</td>
+      <td>{_sf(jao_len, '.2f')}</td>
+      <td>{_sf(pypsa_ckm_row, '.2f')}</td>
+      <td>{_sf(_safe_pct(pypsa_ckm_row, jao_len), '.1f')}%</td>
+      <td><button id="b-{row_idx}" class="btn" onclick="toggleDetails('{row_idx}')">Show Parameters</button></td>
     </tr>
-    <tr>
-      <td colspan="8">
-        <div id="details-{row_counter}" class="details-section">
-          <div class="show-debug" onclick="toggleDebugInfo('{row_counter}')">Show/Hide Debug Info</div>
-          <div id="debug-{row_counter}" class="debug-info">
-            <strong>Debug Information:</strong><br>
-            JAO ID: {jao_id}<br>
-            JAO length (km): {_sf(jao_length_km, '.6f')}<br>
-            PyPSA total length (km): {_sf(total_pypsa_km, '.6f')}<br>
-            Coverage ratio: {_sf(coverage, '.2f')}%<br>
-            Raw JAO R/X/B: {_sf(jao_r_total)} / {_sf(jao_x_total)} / {_sf(jao_b_total, '.8f')}<br>
-            JAO per-km R/X/B: {_sf(jao_r_km)} / {_sf(jao_x_km)} / {_sf(jao_b_km, '.8f')}<br>
-          </div>
+    <tr><td colspan="8">
+      <div id="d-{row_idx}" class="details">
+        <div style="margin-bottom:6px;">
+          <a href="javascript:void(0)" onclick="toggleDebug('{row_idx}')">Show/Hide Debug</a>
+        </div>
+        <div id="g-{row_idx}" class="debug">
+          JAO ID: {jao_id}<br/>
+          JAO length (route-km): {_sf(jao_len, '.6f')}<br/>
+          PyPSA total (circuit-km): {_sf(pypsa_ckm_row, '.6f')}<br/>
+          ckm / rkm ratio: {_sf(ratio_ckm_rkm, '.6f')} (as %) → {_sf(_safe_pct(pypsa_ckm_row, jao_len), '.2f')}%<br/>
+          Raw JAO R/X/B: {_sf(jao_r_total)} / {_sf(jao_x_total)} / {_sf(jao_b_total, '.8f')}<br/>
+          JAO per-km R/X/B: {_sf(jao_r_km)} / {_sf(jao_x_km)} / {_sf(jao_b_km, '.8f')}<br/>
+        </div>
 """
 
+        # Allocation & per-km comparison (circuit aware)
+        segs = result.get("matched_lines_data") or []
         if segs:
-            # allocation table
             html += """
-          <h3>JAO Electrical Parameters</h3>
-          <p>R: """ + _sf(jao_r_total) + """ Ω (Total) | """ + _sf(jao_r_km) + """ Ω/km</p>
-          <p>X: """ + _sf(jao_x_total) + """ Ω (Total) | """ + _sf(jao_x_km) + """ Ω/km</p>
-          <p>B: """ + _sf(jao_b_total, '.8f') + """ S (Total) | """ + _sf(jao_b_km, '.8f') + """ S/km</p>
+        <h3>JAO Electrical Parameters</h3>
+        <p>R: """ + _sf(jao_r_total) + """ Ω (Total) | """ + _sf(jao_r_km) + """ Ω/km</p>
+        <p>X: """ + _sf(jao_x_total) + """ Ω (Total) | """ + _sf(jao_x_km) + """ Ω/km</p>
+        <p>B: """ + _sf(jao_b_total, '.8f') + """ S (Total) | """ + _sf(jao_b_km, '.8f') + """ S/km</p>
 
-          <h3>Parameter Allocation to PyPSA Lines</h3>
-          <table>
-            <tr><th>PyPSA ID</th><th>Length (km)</th><th>Circuits</th>
-                <th>Allocated R (Ω)</th><th>Allocated X (Ω)</th><th>Allocated B (S)</th><th>Status</th></tr>
+        <h3>Parameter Allocation to PyPSA Lines</h3>
+        <table>
+          <tr>
+            <th>PyPSA ID</th>
+            <th>Length (km)</th>
+            <th>Circuits</th>
+            <th>Allocated R (Ω)</th>
+            <th>Allocated X (Ω)</th>
+            <th>Allocated B (S)</th>
+            <th>Status</th>
+          </tr>
 """
             for seg in segs:
                 pid = str(seg.get("network_id", ""))
                 prow = pypsa_by_id.get(pid)
                 if prow is not None:
-                    km = meters_to_km(prow.get("length", None)) or 0.0
+                    L_km = _meters_to_km_pypsa(prow.get("length", None))
                     circuits = int(prow.get("circuits", 1) or 1)
                 else:
-                    km = float(seg.get("length_km", 0) or 0.0)
+                    L_km = float(seg.get("length_km", 0.0) or 0.0)
                     circuits = int(seg.get("num_parallel", 1) or 1)
 
                 html += f"""
-            <tr class="{'good-match' if str(seg.get('allocation_status', '')) in ['Applied', 'Parallel Circuit'] else ''}">
-              <td>{pid}</td>
-              <td>{_sf(km, '.2f')}</td>
-              <td>{circuits}</td>
-              <td>{_sf(seg.get('allocated_r', None))}</td>
-              <td>{_sf(seg.get('allocated_x', None))}</td>
-              <td>{_sf(seg.get('allocated_b', None), '.8f')}</td>
-              <td>{seg.get('allocation_status', '')}</td>
-            </tr>
+          <tr class="{'good' if str(seg.get('allocation_status','')) in ['Applied','Parallel Circuit'] else ''}">
+            <td>{pid}</td>
+            <td>{_sf(L_km, '.2f')}</td>
+            <td>{circuits}</td>
+            <td>{_sf(seg.get('allocated_r'))}</td>
+            <td>{_sf(seg.get('allocated_x'))}</td>
+            <td>{_sf(seg.get('allocated_b'), '.8f')}</td>
+            <td>{seg.get('allocation_status','')}</td>
+          </tr>
 """
 
-            # per-km comparison - UPDATED WITH CIRCUIT ADJUSTMENT
+            # Per-km comparison (circuit adjusted JAO)
             html += """
-          </table>
-          <h3>Per-Kilometer Comparison</h3>
-          <table>
-            <tr>
-              <th>PyPSA ID</th>
-              <th>JAO R (Ω/km)</th><th>PyPSA R (Ω/km)</th><th>R Diff (%)</th>
-              <th>JAO X (Ω/km)</th><th>PyPSA X (Ω/km)</th><th>X Diff (%)</th>
-              <th>JAO B (S/km)</th><th>PyPSA B (S/km)</th><th>B Diff (%)</th>
-            </tr>
+        </table>
+        <h3>Per-Kilometer Comparison</h3>
+        <table>
+          <tr>
+            <th>PyPSA ID</th>
+            <th>JAO R (Ω/km adj.)</th><th>PyPSA R (Ω/km)</th><th>R Δ (%)</th>
+            <th>JAO X (Ω/km adj.)</th><th>PyPSA X (Ω/km)</th><th>X Δ (%)</th>
+            <th>JAO B (S/km adj.)</th><th>PyPSA B (S/km)</th><th>B Δ (%)</th>
+          </tr>
 """
-
-            def diff_pct(a, b):
-                try:
-                    b = float(b)
-                    if b == 0:
-                        return None
-                    return 100.0 * (float(a) - b) / abs(b)
-                except Exception:
-                    return None
-
-            def cls(d):
-                if d is None: return ""
-                if abs(d) <= 20: return "good-match"
-                if abs(d) <= 50: return "moderate-match"
-                return "poor-match"
-
             for seg in segs:
                 pid = str(seg.get("network_id", ""))
                 prow = pypsa_by_id.get(pid)
                 if prow is not None:
-                    km = meters_to_km(prow.get("length", None)) or 0.0
+                    L_km = _meters_to_km_pypsa(prow.get("length", None))
                     r = float(prow.get("r", 0) or 0.0)
                     x = float(prow.get("x", 0) or 0.0)
                     b = float(prow.get("b", 0) or 0.0)
                     circuits = int(prow.get("circuits", 1) or 1)
-                    if km > 0:
-                        rpk, xpk, bpk = r / km, x / km, b / km
+                    if L_km > 0:
+                        rpk, xpk, bpk = r / L_km, x / L_km, b / L_km
                     else:
                         rpk = xpk = bpk = 0.0
                 else:
@@ -613,66 +561,70 @@ def create_enhanced_summary_table(jao_gdf, pypsa_gdf, matching_results, output_d
                     bpk = float(seg.get("original_b_per_km", 0) or 0.0)
                     circuits = int(seg.get("num_parallel", 1) or 1)
 
-                # Apply circuit adjustment for comparison
-                # For series elements (R, X): divide JAO by circuits
-                # For parallel elements (B): multiply JAO by circuits
-                jao_r_km_adjusted = jao_r_km / circuits
-                jao_x_km_adjusted = jao_x_km / circuits
-                jao_b_km_adjusted = jao_b_km * circuits
+                jao_r_adj = jao_r_km / circuits if circuits > 0 else jao_r_km
+                jao_x_adj = jao_x_km / circuits if circuits > 0 else jao_x_km
+                jao_b_adj = jao_b_km * circuits if circuits > 0 else jao_b_km
 
-                # Calculate differences with circuit-adjusted values
-                rd = diff_pct(jao_r_km_adjusted, rpk)
-                xd = diff_pct(jao_x_km_adjusted, xpk)
-                bd = diff_pct(jao_b_km_adjusted, bpk)
+                rd = _diff_pct(jao_r_adj, rpk)
+                xd = _diff_pct(jao_x_adj, xpk)
+                bd = _diff_pct(jao_b_adj, bpk)
+
+                def _cls(d):
+                    if d is None: return ""
+                    if abs(d) <= 20: return "good"
+                    if abs(d) <= 50: return "mod"
+                    return "poor"
 
                 html += f"""
-            <tr>
-              <td>{pid}</td>
-              <td>{_sf(jao_r_km_adjusted)}</td><td>{_sf(rpk)}</td><td class="{cls(rd)}">{_sf(rd, '.2f') if rd is not None else 'N/A'}%</td>
-              <td>{_sf(jao_x_km_adjusted)}</td><td>{_sf(xpk)}</td><td class="{cls(xd)}">{_sf(xd, '.2f') if xd is not None else 'N/A'}%</td>
-              <td>{_sf(jao_b_km_adjusted, '.8f')}</td><td>{_sf(bpk, '.8f')}</td><td class="{cls(bd)}">{_sf(bd, '.2f') if bd is not None else 'N/A'}%</td>
-            </tr>
+          <tr>
+            <td>{pid}</td>
+            <td>{_sf(jao_r_adj)}</td><td>{_sf(rpk)}</td><td class="{_cls(rd)}">{_sf(rd, '.2f') if rd is not None else 'N/A'}%</td>
+            <td>{_sf(jao_x_adj)}</td><td>{_sf(xpk)}</td><td class="{_cls(xd)}">{_sf(xd, '.2f') if xd is not None else 'N/A'}%</td>
+            <td>{_sf(jao_b_adj, '.8f')}</td><td>{_sf(bpk, '.8f')}</td><td class="{_cls(bd)}">{_sf(bd, '.2f') if bd is not None else 'N/A'}%</td>
+          </tr>
 """
 
-            # residuals (use fields if present; else compute)
+            # Residuals
             alloc_r = float(result.get("allocated_r_sum", 0) or 0.0)
             alloc_x = float(result.get("allocated_x_sum", 0) or 0.0)
             alloc_b = float(result.get("allocated_b_sum", 0) or 0.0)
 
-            def res_pct(total, alloc):
+            def _res_pct(total, alloc):
                 try:
-                    if abs(total) < 1e-12:
+                    if abs(float(total)) < 1e-12:
                         return None
-                    return 100.0 * (total - alloc) / abs(total)
+                    return 100.0 * (float(total) - float(alloc)) / abs(float(total))
                 except Exception:
                     return None
 
-            r_res, x_res, b_res = jao_r_total - alloc_r, jao_x_total - alloc_x, jao_b_total - alloc_b
-            r_res_pct, x_res_pct, b_res_pct = res_pct(jao_r_total, alloc_r), res_pct(jao_x_total, alloc_x), res_pct(
-                jao_b_total, alloc_b)
+            r_res = jao_r_total - alloc_r
+            x_res = jao_x_total - alloc_x
+            b_res = jao_b_total - alloc_b
+            r_res_pct = _res_pct(jao_r_total, alloc_r)
+            x_res_pct = _res_pct(jao_x_total, alloc_x)
+            b_res_pct = _res_pct(jao_b_total, alloc_b)
 
-            def cls_res(v):
+            def _cls_res(v):
                 if v is None: return ""
-                if abs(v) <= 10: return "good-match"
-                if abs(v) <= 30: return "moderate-match"
-                return "poor-match"
+                if abs(v) <= 10: return "good"
+                if abs(v) <= 30: return "mod"
+                return "poor"
 
             html += f"""
-          <h3>Parameter Allocation Consistency</h3>
-          <table>
-            <tr><th>Parameter</th><th>JAO Total</th><th>Sum Allocated</th><th>Residual</th><th>Residual %</th></tr>
-            <tr><td>R (Ω)</td><td>{_sf(jao_r_total)}</td><td>{_sf(alloc_r)}</td><td>{_sf(r_res)}</td><td class="{cls_res(r_res_pct)}">{_sf(r_res_pct, '.2f') if r_res_pct is not None else 'N/A'}%</td></tr>
-            <tr><td>X (Ω)</td><td>{_sf(jao_x_total)}</td><td>{_sf(alloc_x)}</td><td>{_sf(x_res)}</td><td class="{cls_res(x_res_pct)}">{_sf(x_res_pct, '.2f') if x_res_pct is not None else 'N/A'}%</td></tr>
-            <tr><td>B (S)</td><td>{_sf(jao_b_total, '.8f')}</td><td>{_sf(alloc_b, '.8f')}</td><td>{_sf(b_res, '.8f')}</td><td class="{cls_res(b_res_pct)}">{_sf(b_res_pct, '.2f') if b_res_pct is not None else 'N/A'}%</td></tr>
-          </table>
+        <h3>Parameter Allocation Consistency</h3>
+        <table>
+          <tr><th>Parameter</th><th>JAO Total</th><th>Sum Allocated</th><th>Residual</th><th>Residual %</th></tr>
+          <tr><td>R (Ω)</td><td>{_sf(jao_r_total)}</td><td>{_sf(alloc_r)}</td><td>{_sf(r_res)}</td><td class="{_cls_res(r_res_pct)}">{_sf(r_res_pct, '.2f') if r_res_pct is not None else 'N/A'}%</td></tr>
+          <tr><td>X (Ω)</td><td>{_sf(jao_x_total)}</td><td>{_sf(alloc_x)}</td><td>{_sf(x_res)}</td><td class="{_cls_res(x_res_pct)}">{_sf(x_res_pct, '.2f') if x_res_pct is not None else 'N/A'}%</td></tr>
+          <tr><td>B (S)</td><td>{_sf(jao_b_total, '.8f')}</td><td>{_sf(alloc_b, '.8f')}</td><td>{_sf(b_res, '.8f')}</td><td class="{_cls_res(b_res_pct)}">{_sf(b_res_pct, '.2f') if b_res_pct is not None else 'N/A'}%</td></tr>
+        </table>
 """
         else:
             html += "<p>No parameter allocation data available for this match.</p>"
 
         html += """
-        </div>
-      </td>
-    </tr>
+      </div>
+    </td></tr>
 """
 
     html += """
@@ -681,14 +633,14 @@ def create_enhanced_summary_table(jao_gdf, pypsa_gdf, matching_results, output_d
 </html>
 """
 
-    # write file
-    out_dir.mkdir(exist_ok=True)
+    # ---------------------- write file --------------------
     out_file = out_dir / "jao_pypsa_electrical_parameters.html"
     with open(out_file, "w", encoding="utf-8") as f:
         f.write(html)
 
     print(f"Electrical parameters summary saved to {out_file}")
     return out_file
+
 
 def random_match_quality_check(matches, jao_gdf, pypsa_gdf, output_dir, sample_size=20):
     """

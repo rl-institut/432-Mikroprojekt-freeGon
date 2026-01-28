@@ -1610,6 +1610,260 @@ document.addEventListener('DOMContentLoaded', function() {{
 
     print(f"Visualization saved to {out_path}")
     return str(out_path)
+def save_dual_match_png(
+    jao_gdf,
+    pypsa_gdf,
+    matching_results,
+    out_path,
+    title="JAO vs PyPSA — matched/unmatched by 220/380 kV",
+    germany_border_path="/home/mohsen/PycharmProjects/freeGon/grid-matcher-original/432-Mikroprojekt-freeGon/grid_matcher/data/georef-germany-gemeinde@public.geojson",
+    border_buffer_km=8.0,      # small buffer to keep coastal segments
+    north_lat_cutoff=55.15     # crop anything north of this latitude (°N)
+):
+    """
+    Render a static PNG showing JAO & PyPSA lines, split by matched/unmatched
+    and 220 vs 380/400 kV. Uses an accurate Germany border outline, crops the
+    very north (south of Denmark), and places stacked legends at bottom-right.
+    """
+    import json
+    from pathlib import Path
+    import numpy as np
+    import pandas as pd
+    import geopandas as gpd
+    import matplotlib.pyplot as plt
+    from shapely import wkt as _wkt
+    from shapely.geometry import shape, box
+    from matplotlib.lines import Line2D
+    from pyproj import Transformer
+
+    # ---------------- helpers ----------------
+    def _as_gdf(obj, crs="EPSG:4326"):
+        """Accept a GeoDataFrame or a DataFrame with geometry/geom/wkt; return GeoDataFrame."""
+        if isinstance(obj, gpd.GeoDataFrame):
+            return obj if obj.crs else obj.set_crs(crs, allow_override=True)
+        if not isinstance(obj, pd.DataFrame):
+            raise TypeError("Expected GeoDataFrame or DataFrame with geometry.")
+        df = obj.copy()
+        geom_col = next((c for c in ("geometry", "geom", "wkt") if c in df.columns), None)
+        if geom_col is None:
+            raise ValueError("Provide 'geometry', 'geom', or 'wkt' column.")
+
+        def _parse(v):
+            if v is None or (isinstance(v, float) and np.isnan(v)):
+                return None
+            if hasattr(v, "geom_type"):  # shapely
+                return v
+            s = str(v).strip()
+            if not s:
+                return None
+            if s.startswith("{"):        # GeoJSON text
+                return shape(json.loads(s))
+            if any(k in s.upper() for k in ("LINESTRING", "MULTI", "POINT", "POLYGON")):
+                return _wkt.loads(s)
+            return None
+
+        df["geometry"] = df[geom_col].apply(_parse)
+        gdf = gpd.GeoDataFrame(df, geometry="geometry", crs=crs)
+        return gdf[gdf.geometry.notna()].copy()
+
+    def _to_3857(gdf):
+        """Project to EPSG:3857."""
+        if gdf.crs is None:
+            gdf = gdf.set_crs(4326, allow_override=True)
+        return gdf if gdf.crs.to_epsg() == 3857 else gdf.to_crs(3857)
+
+    def _vnum(v):
+        """Extract numeric voltage (kV) from strings like '380', '400', '380-DC'."""
+        try:
+            s = str(v)
+            if "DC" in s.upper():
+                return np.nan
+            return float(s.split()[0].split("-")[0])
+        except Exception:
+            return np.nan
+
+    def _bucket(vn):
+        """Map numeric voltage to '220' or '380' buckets (else 'other')."""
+        if np.isnan(vn):
+            return "other"
+        if vn >= 300:
+            return "380"
+        if 200 <= vn < 300:
+            return "220"
+        return "other"
+
+    # ---------------- matched id sets ----------------
+    matched_jao, matched_py = set(), set()
+    for r in (matching_results or []):
+        if not r or not r.get("matched", False):
+            continue
+        if r.get("jao_id") is not None:
+            matched_jao.add(str(r["jao_id"]))
+        pids = r.get("pypsa_ids", [])
+        if isinstance(pids, str):
+            pids = [p.strip() for p in pids.replace(",", ";").split(";") if p.strip()]
+        matched_py.update(map(str, pids))
+
+    # ---------------- prepare JAO ----------------
+    j = _as_gdf(jao_gdf)
+    if "voltage" not in j.columns and "v_nom" in j.columns:
+        j["voltage"] = j["v_nom"]
+    j["_id"] = (j["jao_id"].astype(str) if "jao_id" in j.columns else j["id"].astype(str))
+    j["vnum"] = j["voltage"].apply(_vnum)
+    j["kv_bucket"] = j["vnum"].apply(_bucket)
+    j["matched"] = j["_id"].isin(matched_jao)
+    j = j[j["kv_bucket"].isin(["220", "380"])].copy()
+
+    # ---------------- prepare PyPSA ----------------
+    p = _as_gdf(pypsa_gdf)
+    if "voltage" not in p.columns and "v_nom" in p.columns:
+        p["voltage"] = p["v_nom"]
+    p["_id"] = (p["line_id"].astype(str) if "line_id" in p.columns and p["line_id"].notna().any()
+                else p["id"].astype(str))
+    p["vnum"] = p["voltage"].apply(_vnum)
+    p["kv_bucket"] = p["vnum"].apply(_bucket)
+    p["matched"] = p["_id"].isin(matched_py)
+    p = p[p["kv_bucket"].isin(["220", "380"])].copy()
+
+    # ---------------- border, buffer, crop ----------------
+    border = None
+    try:
+        border = gpd.read_file(germany_border_path)[["geometry"]]
+        border["__one"] = 1
+        border = border.dissolve(by="__one").drop(columns="__one")
+    except Exception:
+        border = None
+
+    j3857, p3857 = _to_3857(j), _to_3857(p)
+
+    if border is not None and not border.empty:
+        b3857 = _to_3857(border)
+        pad = float(border_buffer_km) * 1000.0
+        bpoly = b3857.geometry.unary_union.buffer(pad)
+        j3857 = gpd.clip(j3857, bpoly)
+        p3857 = gpd.clip(p3857, bpoly)
+    else:
+        b3857 = None
+
+    # crop north of Denmark
+    transformer = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
+    _, y_cut = transformer.transform(10.0, float(north_lat_cutoff))  # lon arbitrary for projection
+    if b3857 is not None and not b3857.empty:
+        x0, y0, x1, _ = b3857.total_bounds
+    else:
+        x0 = min(j3857.total_bounds[0], p3857.total_bounds[0])
+        y0 = min(j3857.total_bounds[1], p3857.total_bounds[1])
+        x1 = max(j3857.total_bounds[2], p3857.total_bounds[2])
+    crop_box = gpd.GeoDataFrame(geometry=[box(x0 - 2e4, y0 - 2e4, x1 + 2e4, y_cut)], crs="EPSG:3857")
+    j3857 = gpd.clip(j3857, crop_box)
+    p3857 = gpd.clip(p3857, crop_box)
+
+    # ---------------- styles ----------------
+    py_colors = {
+        ("matched", "380"): "#1f77b4",  # blue
+        ("matched", "220"): "#6baed6",  # light blue
+        ("unmatched", "380"): "#9e9e9e",  # dark grey
+        ("unmatched", "220"): "#c7c7c7",  # light grey
+    }
+    jao_colors = {
+        ("matched", "380"): "#2ca02c",   # green
+        ("matched", "220"): "#74c476",   # light green
+        ("unmatched", "380"): "#e41a1c", # red
+        ("unmatched", "220"): "#ff7f00", # orange
+    }
+    py_lw = {"380": 1.6, "220": 1.4}
+    jao_lw = {"380": 2.6, "220": 2.2}
+
+    # ---------------- plot ----------------
+    fig, ax = plt.subplots(figsize=(8.6, 11.0), dpi=180)
+    fig.subplots_adjust(right=0.90, bottom=0.10)
+    ax.set_title(title, fontsize=13, pad=10)
+
+    # border outline
+    if b3857 is not None and not b3857.empty:
+        b3857.boundary.plot(ax=ax, color="black", linewidth=1.0, zorder=1)
+
+    # PyPSA underlays
+    for kv in ("380", "220"):
+        for mflag, lab in ((True, "matched"), (False, "unmatched")):
+            sub = p3857[(p3857["kv_bucket"] == kv) & (p3857["matched"] == mflag)]
+            if not sub.empty:
+                sub.plot(
+                    ax=ax,
+                    color=py_colors[(lab, kv)],
+                    linewidth=py_lw[kv],
+                    alpha=1.0 if lab == "matched" else 0.85,
+                    zorder=2 if lab == "unmatched" else 3,
+                )
+
+    # JAO overlays
+    for kv in ("380", "220"):
+        for mflag, lab in ((True, "matched"), (False, "unmatched")):
+            sub = j3857[(j3857["kv_bucket"] == kv) & (j3857["matched"] == mflag)]
+            if not sub.empty:
+                sub.plot(
+                    ax=ax,
+                    color=jao_colors[(lab, kv)],
+                    linewidth=jao_lw[kv],
+                    alpha=1.0 if lab == "matched" else 0.95,
+                    zorder=5 if lab == "unmatched" else 6,
+                )
+
+    # view window (respect crop)
+    ax.set_xlim(*crop_box.total_bounds[[0, 2]])
+    ax.set_ylim(*crop_box.total_bounds[[1, 3]])
+    ax.set_xticks([]); ax.set_yticks([])
+    for s in ax.spines.values():
+        s.set_visible(True)
+        s.set_linewidth(1.1)
+        s.set_color("white")
+
+    # legends (stacked, bottom-right, close together)
+    py_handles = [
+        Line2D([], [], color=py_colors[("matched", "380")], lw=3, label="PyPSA matched 380/400 kV"),
+        Line2D([], [], color=py_colors[("matched", "220")], lw=3, label="PyPSA matched 220 kV"),
+        Line2D([], [], color=py_colors[("unmatched", "380")], lw=3, label="PyPSA unmatched 380/400 kV"),
+        Line2D([], [], color=py_colors[("unmatched", "220")], lw=3, label="PyPSA unmatched 220 kV"),
+    ]
+    jao_handles = [
+        Line2D([], [], color=jao_colors[("matched", "380")], lw=4, label="JAO matched 380/400 kV"),
+        Line2D([], [], color=jao_colors[("matched", "220")], lw=4, label="JAO matched 220 kV"),
+        Line2D([], [], color=jao_colors[("unmatched", "380")], lw=4, label="JAO unmatched 380/400 kV"),
+        Line2D([], [], color=jao_colors[("unmatched", "220")], lw=4, label="JAO unmatched 220 kV"),
+    ]
+
+    fig.legend(
+        handles=py_handles,
+        loc="lower right",
+        bbox_to_anchor=(0.985, 0.12),
+        bbox_transform=fig.transFigure,
+        frameon=True,
+        title="PyPSA",
+        fontsize=8,
+        title_fontsize=9,
+    )
+    fig.legend(
+        handles=jao_handles,
+        loc="lower right",
+        bbox_to_anchor=(0.985, 0.36),
+        bbox_transform=fig.transFigure,
+        frameon=True,
+        title="JAO",
+        fontsize=8,
+        title_fontsize=9,
+    )
+
+    # save
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+    return str(out_path)
+
+
+
+
+
 
 
 

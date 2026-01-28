@@ -4,7 +4,8 @@ Grid Matcher is a specialized tool for matching transmission line data between J
 
 ## Features
 
-- **Automated Line Matching** – Spatially match transmission lines between JAO and PyPSA datasets.  
+- **Automated Line Matching** – Spatially match transmission lines between JAO and PyPSA datasets.
+- **Transformer Matching (MV/HV Substations** – Match JAO and PyPSA transformers/substations within a configurable distance and propagate identifiers/parameters.
 - **Parameter Transfer** – Transfer electrical parameters between matched lines.  
 - **Manual Matching** – Define and apply manual matches for complex cases.  
 - **DC Link Support** – Optionally include DC links in matching and outputs.  
@@ -88,6 +89,23 @@ Additional notes:
 - The download scripts ensure both input formats contain geometry information in WKT (Well-Known Text) format and appropriate electrical parameters.  
 - Both datasets are standardized to use a consistent CRS (`EPSG:4326`).
 
+
+## Transformers
+
+Place transformer CSVs in grid_matcher/data/:
+
+- jao_transformers.csv
+
+- pypsa_transformers.csv
+
+Both files must include either:
+
+- a geometry column containing WKT, or
+
+- lon/lat columns (WGS84).
+
+During the run, cleaned versions (with valid geometry and optional de-duplication) are produced automatically.
+
 ## Basic Usage
 
 After downloading the required data, run the matcher with default settings:
@@ -103,34 +121,42 @@ This will:
 3. Run the automated matching algorithm.  
 4. Generate output files in the `output/matcher` directory.  
 5. Create visualizations for parameter comparison.
+6. (If transformer inputs exist and the flag is enabled) run transformer matching and produce a combined map.
 
 ## Command-Line Options
 
 ```text
-usage: run_matcher.py [-h] [--include-dc-matching] [--include-110kv-matching] 
-                      [--no-dc-output] [--no-110kv-output] [--no-viz] [--quiet]
-                      [--manual] [--no-manual] [--add-predefined] [--no-predefined]
-                      [--import-new-lines] [--output OUTPUT]
-
-Grid Matcher Mode
+usage: run_matcher.py [-h] [--include-dc-matching] [--include-110kv-matching]
+                      [--no-dc-output] [--no-110kv-output]
+                      [--no-viz] [--no-length-comparison]
+                      [--grid-comparison] [--no-grid-comparison]
+                      [--quiet]
+                      [--manual] [--no-manual]
+                      [--add-predefined] [--no-predefined]
+                      [--import-new-lines]
+                      [--include-transformers] [--no-transformers]
+                      [--transformers-distance TRANSFORMERS_DISTANCE]
+                      [--output OUTPUT]
 
 options:
-  -h, --help            show this help message and exit
-  --include-dc-matching
-                        Include DC links in matching
-  --include-110kv-matching
-                        Include 110kV lines in matching
-  --no-dc-output        Exclude DC links from output
-  --no-110kv-output     Exclude 110kV lines from output
-  --no-viz              Skip parameter visualization
-  --quiet               Disable verbose output
-  --manual              Enable manual matching
-  --no-manual           Disable manual matching
-  --add-predefined      Add predefined manual matches
-  --no-predefined       Don't add predefined matches
-  --import-new-lines    Import new lines from CSV files
-  --output OUTPUT, -o OUTPUT
-                        Output directory (default: output/matcher)
+  -h, --help                       Show help and exit.
+  --include-dc-matching            Include DC links in matching.
+  --include-110kv-matching         Include 110 kV lines in matching.
+  --no-dc-output                   Exclude DC links from outputs.
+  --no-110kv-output                Exclude 110 kV lines from outputs.
+  --no-viz                         Skip parameter visualization.
+  --no-length-comparison           Skip line length comparison.
+  --grid-comparison                Generate grid comparison visuals.
+  --no-grid-comparison             Skip grid comparison visuals.
+  --quiet                          Less verbose logging.
+  --manual / --no-manual           Enable/disable manual line matching.
+  --add-predefined / --no-predefined
+                                   Add/skip predefined manual matches.
+  --import-new-lines               Import *-new-lines.csv before matching.
+  --include-transformers           **Run transformer matching** (default in code: enabled).
+  --no-transformers                Skip transformer matching.
+  --transformers-distance FLOAT    **Max match distance (km) for transformers** (default: 5.0).
+  --output OUTPUT, -o OUTPUT       Output directory (default: output/matcher).
 ```
 
 ## Example Commands
@@ -158,10 +184,18 @@ Import new lines before matching:
 ```bash
 python run_matcher.py --import-new-lines
 ```
+Run transformer matching with a 1 km radius:
+
+```bash
+python run_matcher.py --include-transformers --transformers-distance 1
+```
+
 
 ## Output Files
 
 Generated in the specified output directory (default: `output/matcher`):
+
+Lines:
 
 - `jao_pypsa_matches.csv` – All matched lines and their parameters.  
 - `pypsa_with_eic.csv` – PyPSA lines with added JAO identifiers.  
@@ -170,6 +204,19 @@ Generated in the specified output directory (default: `output/matcher`):
 - `jao_pypsa_matches.html` – Interactive map visualization of matches.  
 - `parameter_comparison.html` – Visualization of electrical parameter comparison.  
 - `parameter_summary.html` – Summary table of parameter statistics.
+
+Transformers:
+
+- `jao_transformers_clean.csv` – Cleaned JAO transformer geometries.
+
+- `pypsa_transformers_clean.csv` – Cleaned PyPSA transformer geometries.
+
+- `transformer_matches.csv (filename created by the pipeline; may vary)` – Pairings with distances and flags.
+
+- `pypsa_transformers_updated.csv` – PyPSA transformers updated with JAO attributes (and EIC identifiers, if available).
+
+- `lines_plus_transformers_matched.html` – Integrated interactive map (voltage-filtered lines plus matched/unmatched transformers).
+
 
 ## Manual Matching
 
