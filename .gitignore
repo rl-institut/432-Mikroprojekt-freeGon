@@ -1,0 +1,45 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual envs
+.venv/
+venv/
+env/
+.env/
+
+# Packaging
+build/
+dist/
+*.egg-info/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs
+*.log
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# ---- IDE ----
+.idea/
+
+# ---- Project-specific: expose only sample outputs ----
+# Ignore everything under output by default
+output/**
+
+# Keep the directory and matcher subtree
+!output/
+!output/matcher/
+
+# Track only the sample outputs folder (recommended name)
+!output/matcher/sample-output/**
+
+# If you kept a space in the folder name instead:
+#!output/matcher/sample\ output/**
+
+# Keep a placeholder if you use one
+!output/.gitkeep
