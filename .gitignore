@@ -28,15 +28,15 @@ Thumbs.db
 .idea/
 
 # ---- Project-specific: expose only sample outputs ----
-# Ignore everything under output by default
+# ignore everything under output
 output/**
 
-# Keep the directory and matcher subtree
+# re-include the path chain to the sample folder
 !output/
 !output/matcher/
-
-# Track only the sample outputs folder (recommended name)
+!output/matcher/sample-output/
 !output/matcher/sample-output/**
+
 
 # If you kept a space in the folder name instead:
 #!output/matcher/sample\ output/**
