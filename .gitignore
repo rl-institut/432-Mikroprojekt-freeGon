@@ -28,14 +28,22 @@ Thumbs.db
 .idea/
 
 # ---- Project-specific: expose only sample outputs ----
-# ignore everything under output
+# ignore everything in output by default
 output/**
 
-# re-include the path chain to the sample folder
-!output/
+# keep these so GitHub won't collapse the path
+!output/README.md
 !output/matcher/
-!output/matcher/sample-output/
+!output/matcher/README.md
 !output/matcher/sample-output/**
+
+
+
+# ignore everything under data/
+grid_matcher/data/**
+
+# but keep the placeholder file
+!grid_matcher/data/.gitkeep
 
 
 # If you kept a space in the folder name instead:
