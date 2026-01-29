@@ -247,6 +247,12 @@ If you have new transmission line data to add:
 python run_matcher.py --import-new-lines
 ```
 
+## Available Results
+
+The main results of the matching and parameter comparison are available as an interactive HTML view
+[here](https://rl-institut.github.io/freeGon-grid-matcher/sample-output/).
+
+
 ## Troubleshooting
 
 ### Missing Geometry Data
@@ -274,12 +280,6 @@ Exclude 110 kV lines and DC links to reduce memory usage:
 ```bash
 python run_matcher.py --no-dc-output --no-110kv-output
 ```
-
-### Data Download Errors
-
-- Check internet connection.  
-- Verify Zenodo record IDs and URLs are correct.  
-- Look in the `.cache/zenodo` directory for cached files that may be used as fallbacks.
 
 ## Contributing
 

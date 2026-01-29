@@ -199,20 +199,23 @@ def prepare_visualization_data(matching_results, pypsa_gdf, jao_gdf=None, use_de
     return enhanced_results
 def visualize_parameter_comparison(matching_results, pypsa_gdf, output_dir="output"):
     """
-    Builds a self-contained HTML report comparing original (PyPSA) and allocated (JAO) parameters.
+    Builds a self-contained HTML report comparing original (PyPSA) and allocated (JAO)
+    electrical parameters for matched transmission-line segments.
 
-    Keeps:
-      • Scientific-notation tick labels,
-      • Larger charts,
-      • y=x identity line,
-      • Chart legends hidden (cleaner UI).
-
-    New:
-      • When downloading PNGs, a drawn legend is added on the image:
-        - good match (|Δ| ≤ 20%)
-        - moderate (20–50%, JAO > PyPSA)
-        - large positive Δ (JAO ≫ PyPSA)
-        - negative Δ (JAO < PyPSA)
+    Features:
+      • Larger charts, identity (y=x) reference line
+      • Linear totals with scientific-notation tick labels
+      • Log per-km charts with tick labels only at powers of ten
+      • Symmetric Δ% color bins + matching PNG legend overlay:
+          - green        : good match (|Δ| ≤ 20%)
+          - orange       : moderate + (20–50%, JAO > PyPSA)
+          - red          : large +     (>50%,   JAO > PyPSA)
+          - light blue   : moderate − (20–50%, JAO < PyPSA)
+          - dark blue    : large −     (>50%,   JAO < PyPSA)
+          - grey         : undefined baseline (~0)
+      • Clean UI (chart legends hidden)
+      • Download buttons export PNGs with drawn legend
+      • Filterable data tables; correlation (Pearson r) in titles
 
     Returns: str path to the generated HTML file.
     """
@@ -221,10 +224,11 @@ def visualize_parameter_comparison(matching_results, pypsa_gdf, output_dir="outp
     import pandas as pd
     from scipy.stats import pearsonr
 
-    print("Creating parameter comparison visualizations with PNG legend overlay...")
+    print("Creating parameter comparison visualizations (symmetric bins + PNG legend overlay)...")
 
     # ---------- helpers ----------
     def pct_diff(a, b):
+        """Percentage change from original b to allocated a (100*(a-b)/|b|)."""
         try:
             b = float(b); a = float(a)
         except Exception:
@@ -233,10 +237,12 @@ def visualize_parameter_comparison(matching_results, pypsa_gdf, output_dir="outp
             return None
         return ((a - b) / abs(b)) * 100.0
 
+    # ensure output dir
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # ---------- fast lookup from PyPSA gdf ----------
+    # Accept 'line_id' (preferred) or fallback to 'id'
     pypsa_lookup = {}
     for _, row in pypsa_gdf.iterrows():
         key = str(row.get("line_id", row.get("id", "")))
@@ -258,6 +264,7 @@ def visualize_parameter_comparison(matching_results, pypsa_gdf, output_dir="outp
         jao_x_tot = float(res.get("jao_x") or 0.0)
         jao_b_tot = float(res.get("jao_b") or 0.0)
 
+        # per-km (guard divide-by-zero)
         jao_r_km = jao_r_tot / jao_len_km if jao_len_km > 0 else 0.0
         jao_x_km = jao_x_tot / jao_len_km if jao_len_km > 0 else 0.0
         jao_b_km = jao_b_tot / jao_len_km if jao_len_km > 0 else 0.0
@@ -272,24 +279,29 @@ def visualize_parameter_comparison(matching_results, pypsa_gdf, output_dir="outp
                 continue
 
             length_km = float(seg.get("length_km") or 0.0)
+            # some inputs may be meters
             length_km_conv = (length_km / 1000.0) if length_km > 1000 else length_km
             circuits = int(seg.get("num_parallel") or 1)
 
+            # allocated (JAO mapped to this segment)
             a_r = float(seg.get("allocated_r") or 0.0)
             a_x = float(seg.get("allocated_x") or 0.0)
             a_b = float(seg.get("allocated_b") or 0.0)
 
+            # original from PyPSA
             o_r = float(p_row.get("r") or 0.0)
             o_x = float(p_row.get("x") or 0.0)
             o_b = float(p_row.get("b") or 0.0)
 
+            # per-km for PyPSA (no extra unit conversion beyond length_km_conv)
             o_r_km = (o_r / length_km_conv) if length_km_conv > 0 else 0.0
             o_x_km = (o_x / length_km_conv) if length_km_conv > 0 else 0.0
             o_b_km = (o_b / length_km_conv) if length_km_conv > 0 else 0.0
 
-            j_r_km_adj = jao_r_km / circuits if circuits > 0 else 0.0
-            j_x_km_adj = jao_x_km / circuits if circuits > 0 else 0.0
-            j_b_km_adj = jao_b_km * circuits
+            # circuit adjustments for JAO per-km values
+            j_r_km_adj = jao_r_km / circuits if circuits > 0 else 0.0   # series ÷ circuits
+            j_x_km_adj = jao_x_km / circuits if circuits > 0 else 0.0   # series ÷ circuits
+            j_b_km_adj = jao_b_km * circuits                             # shunt × circuits
 
             rows.append({
                 "jao_id": jao_id,
@@ -375,11 +387,13 @@ def visualize_parameter_comparison(matching_results, pypsa_gdf, output_dir="outp
   </div>
 
   <div class="legend">
-    <strong>Color encoding for points (Δ% = 100·(JAO − PyPSA)/|PyPSA|):</strong>
+    <strong>Color encoding (Δ% = 100·(JAO − PyPSA)/|PyPSA|):</strong>
     <span class="swatch" style="background:#4CAF50"></span> good match (|Δ| ≤ 20%)
-    <span class="swatch" style="background:#ffb74d"></span> moderate (20–50%, JAO &gt; PyPSA)
-    <span class="swatch" style="background:#d32f2f"></span> large positive Δ (JAO ≫ PyPSA)
-    <span class="swatch" style="background:#1976D2"></span> negative Δ (JAO &lt; PyPSA)
+    <span class="swatch" style="background:#ffb74d"></span> moderate + (20–50%)
+    <span class="swatch" style="background:#d32f2f"></span> large + (>50%)
+    <span class="swatch" style="background:#64b5f6"></span> moderate − (20–50%)
+    <span class="swatch" style="background:#1976D2"></span> large − (>50%)
+    <span class="swatch" style="background:#9E9E9E"></span> undefined (baseline ≈ 0)
   </div>
 
   <div class="container">
@@ -481,9 +495,11 @@ def visualize_parameter_comparison(matching_results, pypsa_gdf, output_dir="outp
   </div>
 
 <script>
+  // -------- data from Python --------
   const DATA = __DATA_JSON__;
   const RVALUES = __R_VALUES__;
 
+  // -------- formatting helpers --------
   function sci(n){
     if (!isFinite(n) || n === 0) return '0';
     const sign = n < 0 ? '-' : '';
@@ -497,22 +513,24 @@ def visualize_parameter_comparison(matching_results, pypsa_gdf, output_dir="outp
     return Math.abs(e - Math.round(e)) < 1e-9 ? `10^${Math.round(e)}` : '';
   }
 
+  // -------- symmetric color bins (MATCH legend!) --------
   function colorByDiff(p){
-    if (p === null || isNaN(p)) return 'rgba(150,150,150,0.85)';
-    const clamped = Math.max(-100, Math.min(100, p));
-    if (clamped < 0){
-      const t = Math.min(1, Math.abs(clamped)/50);
-      const r = Math.round(25 + (76 - 25)*t);
-      const g = Math.round(118 + (175 - 118)*t);
-      const b = Math.round(210 + (80 - 210)*t);
-      return `rgba(${r},${g},${b},0.85)`; // blue→green
-    }else{
-      const t = Math.min(1, clamped/50);
-      const r = Math.round(76 + (211 - 76)*t);
-      const g = Math.round(175 + (47 - 175)*t);
-      const b = Math.round(80 + (47 - 80)*t);
-      return `rgba(${r},${g},${b},0.85)`; // green→red
-    }
+    if (p === null || isNaN(p)) return '#9E9E9E';          // undefined baseline
+    const a = Math.abs(p);
+    if (a <= 20) return '#4CAF50';                         // good match (any sign)
+    if (p > 0 && a <= 50) return '#ffb74d';                // moderate +
+    if (p > 0 && a >  50) return '#d32f2f';                // large +
+    if (p < 0 && a <= 50) return '#64b5f6';                // moderate −
+    return '#1976D2';                                      // large −
+  }
+  function labelByDiff(p){
+    if (p === null || isNaN(p)) return 'undefined';
+    const a = Math.abs(p);
+    if (a <= 20) return 'good match';
+    if (p > 0 && a <= 50) return 'moderate +';
+    if (p > 0 && a >  50) return 'large +';
+    if (p < 0 && a <= 50) return 'moderate −';
+    return 'large −';
   }
 
   function axisLabel(param, perKm){
@@ -528,6 +546,7 @@ def visualize_parameter_comparison(matching_results, pypsa_gdf, output_dir="outp
 
   Chart.defaults.font.size = 14;
 
+  // -------- chart helpers --------
   function domainFor(items){
     const xs = items.map(d=>d.x), ys = items.map(d=>d.y);
     const lo = Math.min(Math.min(...xs), Math.min(...ys));
@@ -537,10 +556,12 @@ def visualize_parameter_comparison(matching_results, pypsa_gdf, output_dir="outp
   }
 
   function buildTotals(param, canvasId){
-    const items = DATA.map(it => ({
-      x: +it['original_'+param], y: +it['allocated_'+param],
-      diff: it['diff_'+param+'_pct']
-    })).filter(d => isFinite(d.x) && isFinite(d.y) && d.x>0 && d.y>0);
+    const items = DATA
+      .map(it => ({
+        x: +it['original_'+param], y: +it['allocated_'+param],
+        diff: it['diff_'+param+'_pct']
+      }))
+      .filter(d => isFinite(d.x) && isFinite(d.y) && d.x>0 && d.y>0);
 
     const dom = domainFor(items);
     const ctx = document.getElementById(canvasId).getContext('2d');
@@ -565,28 +586,31 @@ def visualize_parameter_comparison(matching_results, pypsa_gdf, output_dir="outp
               label:(ctx)=>{
                 const p = items[ctx.dataIndex];
                 const diff = (p.diff==null||isNaN(p.diff)) ? 'N/A' : p.diff.toFixed(2)+'%';
-                return [`Original: ${p.x.toExponential(3)}`, `Allocated: ${p.y.toExponential(3)}`, `Δ%: ${diff}`];
+                return [`Original: ${p.x.toExponential(3)}`, `Allocated: ${p.y.toExponential(3)}`, `Δ%: ${diff} (${labelByDiff(p.diff)})`];
               }
             }
           }
         },
         scales:{
           x:{title:{display:true, text:`Original ${axisLabel(param,false)}`},
-             ticks:{callback:(v)=>sci(v)}},
+             ticks:{callback:(v)=>sci(v), maxTicksLimit:6}},
           y:{title:{display:true, text:`Allocated ${axisLabel(param,false)}`},
-             ticks:{callback:(v)=>sci(v)}}
+             ticks:{callback:(v)=>sci(v), maxTicksLimit:6}}
         }
       }
     });
   }
 
   function buildPerKm(param, canvasId){
-    const items = DATA.map(it => ({
-      x: +it['original_'+param+'_per_km'],
-      y: +it['jao_'+param+'_km_adjusted'],
-      diff: it['diff_'+param+'_pct_km']
-    })).filter(d => isFinite(d.x) && isFinite(d.y) && d.x>0 && d.y>0);
+    const items = DATA
+      .map(it => ({
+        x: +it['original_'+param+'_per_km'],
+        y: +it['jao_'+param+'_km_adjusted'],
+        diff: it['diff_'+param+'_pct_km']
+      }))
+      .filter(d => isFinite(d.x) && isFinite(d.y) && d.x>0 && d.y>0);
 
+    // Identity line domain for log scales
     const xs = items.map(d=>d.x), ys = items.map(d=>d.y);
     const lo = Math.min(Math.min(...xs), Math.min(...ys));
     const hi = Math.max(Math.max(...xs), Math.max(...ys));
@@ -612,16 +636,16 @@ def visualize_parameter_comparison(matching_results, pypsa_gdf, output_dir="outp
               label:(ctx)=>{
                 const p = items[ctx.dataIndex];
                 const diff = (p.diff==null||isNaN(p.diff)) ? 'N/A' : p.diff.toFixed(2)+'%';
-                return [`PyPSA: ${p.x.toExponential(3)}`, `JAO: ${p.y.toExponential(3)}`, `Δ%: ${diff}`];
+                return [`PyPSA: ${p.x.toExponential(3)}`, `JAO: ${p.y.toExponential(3)}`, `Δ%: ${diff} (${labelByDiff(p.diff)})`];
               }
             }
           }
         },
         scales:{
           x:{type:'logarithmic', title:{display:true, text:`PyPSA ${axisLabel(param,true)}`},
-             ticks:{callback:(v)=>logTick(v)}},
+             ticks:{callback:(v)=>logTick(v), maxTicksLimit:6}},
           y:{type:'logarithmic', title:{display:true, text:`JAO ${axisLabel(param,true)} (adjusted)`},
-             ticks:{callback:(v)=>logTick(v)}}
+             ticks:{callback:(v)=>logTick(v), maxTicksLimit:6}}
         }
       }
     });
@@ -639,23 +663,19 @@ def visualize_parameter_comparison(matching_results, pypsa_gdf, output_dir="outp
   }
 
   function drawLegend(ctx, canvasWidth, canvasHeight){
-    // Colors synced with UI legend
     const items = [
       {label: 'good match (|Δ| ≤ 20%)', color: '#4CAF50'},
-      {label: 'moderate (20–50%, JAO > PyPSA)', color: '#ffb74d'},
-      {label: 'large positive Δ (JAO ≫ PyPSA)', color: '#d32f2f'},
-      {label: 'negative Δ (JAO < PyPSA)', color: '#1976D2'},
+      {label: 'moderate + (20–50%)',   color: '#ffb74d'},
+      {label: 'large + (>50%)',        color: '#d32f2f'},
+      {label: 'moderate − (20–50%)',   color: '#64b5f6'},
+      {label: 'large − (>50%)',        color: '#1976D2'},
+      {label: 'undefined (baseline ≈ 0)', color: '#9E9E9E'},
     ];
 
-    const pad = 12;
-    const sw = 14;          // swatch width
-    const sh = 10;          // swatch height
-    const gap = 8;
-    const lineH = 20;
+    const pad = 12, sw = 14, sh = 10, gap = 8, lineH = 20;
     const header = 'Δ% legend (color encoding)';
     ctx.font = '14px Arial';
 
-    // Compute box size
     let textW = ctx.measureText(header).width;
     items.forEach(it => { textW = Math.max(textW, ctx.measureText(it.label).width); });
     const boxW = Math.ceil(pad*3 + sw + gap + textW);
@@ -664,31 +684,26 @@ def visualize_parameter_comparison(matching_results, pypsa_gdf, output_dir="outp
     const x = canvasWidth - boxW - 16;
     const y = canvasHeight - boxH - 16;
 
-    // Background
     ctx.save();
-    ctx.globalAlpha = 0.95;
+    ctx.globalAlpha = 0.97;
     ctx.fillStyle = '#ffffff';
     ctx.strokeStyle = 'rgba(0,0,0,0.15)';
     drawRoundedRect(ctx, x, y, boxW, boxH, 8);
-    ctx.fill();
-    ctx.stroke();
+    ctx.fill(); ctx.stroke();
 
-    // Header
     ctx.fillStyle = '#333';
     ctx.font = 'bold 14px Arial';
     ctx.fillText(header, x + pad, y + pad + 12);
 
-    // Items
     ctx.font = '14px Arial';
-    let yy = y + pad + 20;
+    let yy = y + pad + 22;
     items.forEach(it => {
       ctx.fillStyle = it.color;
-      ctx.fillRect(x + pad, yy - sh + 8, sw, sh);
+      ctx.fillRect(x + pad, yy - sh + 6, sw, sh);
       ctx.strokeStyle = 'rgba(0,0,0,0.2)';
-      ctx.strokeRect(x + pad, yy - sh + 8, sw, sh);
-
+      ctx.strokeRect(x + pad, yy - sh + 6, sw, sh);
       ctx.fillStyle = '#333';
-      ctx.fillText(it.label, x + pad + sw + gap, yy + 6);
+      ctx.fillText(it.label, x + pad + sw + gap, yy + 4);
       yy += lineH;
     });
     ctx.restore();
@@ -705,10 +720,9 @@ def visualize_parameter_comparison(matching_results, pypsa_gdf, output_dir="outp
     ctx.fillRect(0,0,w,h);
     ctx.drawImage(canvas, 0, 0);
 
-    // draw legend overlay
+    // legend overlay
     drawLegend(ctx, w, h);
 
-    // download
     if (tmp.toBlob) {
       tmp.toBlob((blob)=>{
         const a = document.createElement('a');
@@ -727,7 +741,7 @@ def visualize_parameter_comparison(matching_results, pypsa_gdf, output_dir="outp
     }
   }
 
-  // ------- tables & filters -------
+  // -------- tables --------
   function fillTotalsTable(){
     const tb = document.querySelector('#tot_table tbody');
     tb.innerHTML = '';
@@ -811,7 +825,7 @@ def visualize_parameter_comparison(matching_results, pypsa_gdf, output_dir="outp
     tabs[1].classList.toggle('active', id==='tbl_km');
   }
 
-  // ------- download buttons -------
+  // -------- download buttons --------
   function bindDownloadButtons(){
     document.querySelectorAll('.download-btn').forEach(btn=>{
       btn.addEventListener('click', ()=>{
@@ -822,17 +836,30 @@ def visualize_parameter_comparison(matching_results, pypsa_gdf, output_dir="outp
     });
   }
 
-  // init
+  // -------- init --------
   document.addEventListener('DOMContentLoaded', ()=>{
-    buildTotals('r', 'r_tot'); buildTotals('x', 'x_tot'); buildTotals('b', 'b_tot');
-    buildPerKm('r', 'r_km'); buildPerKm('x', 'x_km'); buildPerKm('b', 'b_km');
-    fillTotalsTable(); fillPerKmTable(); setupFilters(); bindDownloadButtons();
+    // totals
+    buildTotals('r', 'r_tot');
+    buildTotals('x', 'x_tot');
+    buildTotals('b', 'b_tot');
+
+    // per-km
+    buildPerKm('r', 'r_km');
+    buildPerKm('x', 'x_km');
+    buildPerKm('b', 'b_km');
+
+    // tables
+    fillTotalsTable();
+    fillPerKmTable();
+    setupFilters();
+    bindDownloadButtons();
   });
 </script>
 </body>
 </html>
 """
 
+    # substitute data
     html = html.replace("__DATA_JSON__", json.dumps(rows))
     html = html.replace("__R_VALUES__", json.dumps(r_vals))
 
@@ -840,6 +867,7 @@ def visualize_parameter_comparison(matching_results, pypsa_gdf, output_dir="outp
     out_file.write_text(html, encoding="utf-8")
     print(f"Parameter comparison visualization saved to {out_file}")
     return str(out_file)
+
 
 
 
