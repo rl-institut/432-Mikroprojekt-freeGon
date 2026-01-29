@@ -1,6 +1,6 @@
 def calculate_difference_percentage(original, allocated):
     """
-    Calculate the percentage difference between original and allocated values.
+    calculate the percentage difference between original and allocated values.
 
     Returns a percentage value between -100% and infinity where:
     - 0% means identical values
