@@ -51,3 +51,6 @@ grid_matcher/data/**
 
 # Keep a placeholder if you use one
 !output/.gitkeep
+__pycache__/
+*.pyc
+.cache/
