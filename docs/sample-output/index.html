@@ -1,0 +1,28 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>Sample Output</title>
+<style>
+  body { font-family: system-ui, Arial, sans-serif; margin: 2rem; }
+  h1 { margin-bottom: .5rem; }
+  ul { line-height: 1.8; }
+</style>
+<h1>Sample Output</h1>
+<p>Open the interactive reports below:</p>
+<ul id="files"></ul>
+<script>
+  // Add or remove filenames here as you publish more outputs
+  const files = [
+    "parameter_comparison.html",
+    "jao_pypsa_matches.html",
+    "lines_plus_transformers_matched.html",
+    "JAO-TSO_dashboard.html"
+  ];
+  const ul = document.getElementById("files");
+  files.forEach(f => {
+    const li = document.createElement("li");
+    const a = document.createElement("a");
+    a.href = f; a.textContent = f;
+    a.rel = "noopener"; a.target = "_blank";
+    li.appendChild(a); ul.appendChild(li);
+  });
+</script>
